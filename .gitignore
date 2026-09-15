@@ -1,0 +1,10 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+.idea/
+collector/raw/
+rag/data/**/*.pdf
+collector/airflow/logs/
+collector/airflow/plugins/
+collector/airflow/.env
