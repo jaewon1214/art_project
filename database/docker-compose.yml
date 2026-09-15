@@ -1,0 +1,60 @@
+# ⚠️ 이 파일은 서버(EC2)에서만 실행할 것 — Postgres(pgvector) + Neo4j.
+# 로컬 PC에서는 절대 이 파일로 `docker compose up` 하지 말 것 (5432/7474/7687 포트가
+# 겹치고, 로컬에 별도의 빈 DB가 생겨서 서버 DB와 헷갈리게 됨).
+#
+# 로컬 PC에서 쓰는 건 Airflow뿐이고, 그건 collector/airflow/docker-compose.yml 로 따로 있음:
+#   cd ../collector/airflow && docker compose up -d
+#
+# 서버에서 실행: (서버에는 이 database/ 폴더만 올리면 됨 — collector/rag는 로컬 전용)
+#   cd ~/database (코드 경로) && docker compose up -d
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: music_ai_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:-app}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-app_password}
+      POSTGRES_DB: ${DB_NAME:-music_ai_papers}
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # docker-entrypoint-initdb.d 안의 *.sql은 최초 기동(볼륨이 비어있을 때) 한 번만,
+      # 파일명 알파벳 순서로 자동 실행됨 -> 01_schema.sql 다음 02_seed.sql 순서로 실행됨
+      - ./database/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-app} -d ${DB_NAME:-music_ai_papers}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  neo4j:
+    image: neo4j:5-community
+    container_name: music_ai_neo4j
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: ${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-neo4j_password}
+      NEO4J_PLUGINS: '["apoc"]'
+      # t3.small(2GiB RAM) 기준 튜닝 — Postgres랑 같이 떠도 OOM 안 나게 힙 제한.
+      # 인스턴스 스펙 올리면 이 값도 같이 올릴 것.
+      NEO4J_server_memory_heap_initial__size: 512m
+      NEO4J_server_memory_heap_max__size: 512m
+      NEO4J_server_memory_pagecache_size: 256m
+    ports:
+      - "${NEO4J_HTTP_PORT:-7474}:7474"   # 브라우저 콘솔(HTTP)
+      - "${NEO4J_BOLT_PORT:-7687}:7687"   # bolt 프로토콜 — graph/loader.py 등 코드에서 접속용
+    volumes:
+      - neo4jdata:/data
+      - neo4jlogs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:7474 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pgdata:
+  neo4jdata:
+  neo4jlogs:
