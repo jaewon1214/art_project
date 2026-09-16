@@ -25,6 +25,9 @@ import os
 import re
 import time
 from datetime import date, datetime
+from email.utils import parsedate_to_datetime
+from html import unescape
+from urllib.parse import urlparse
 
 import feedparser  # pip install feedparser
 import requests
@@ -48,7 +51,10 @@ FEEDS: dict[str, str] = {
     "Complete Music Update": "https://completemusicupdate.com/feed/",
     "Water & Music": "https://newsletter.waterandmusic.com/rss",
     "The Trichordist": "https://thetrichordist.com/feed/",
-    "한국저작권위원회 보도자료": "https://www.copyright.or.kr/open/public-data/rss/rss.do?mode=news",
+    # 2026-09-16: "한국저작권위원회 보도자료"는 여기서 제거함 — 이 RSS는 <link>가 없는 형식이라
+    # 아래 collect()가 entry.link에 그대로 접근하면 AttributeError로 collect() 전체가 죽는 버그가
+    # 있었음(실제로 한 번도 안 걸렸다면 이 소스가 그동안 빈 결과였거나 아직 안 돌려봤다는 뜻).
+    # policy_collector.py에 목록 페이지 매칭까지 포함해서 제대로 옮겨 구현해뒀으니 그쪽을 볼 것.
 }
 
 # 매체별 실제 게재 언어 — pipeline.ingest의 번역 단계(document_type != "paper" and language != "ko"
@@ -61,7 +67,6 @@ FEED_LANGUAGE: dict[str, str] = {
     "Complete Music Update": "en",
     "Water & Music": "en",
     "The Trichordist": "en",
-    "한국저작권위원회 보도자료": "ko",
 }
 
 # 참고: 아래는 확인해봤지만 일부러 안 넣은 후보들 — 필요하면 언제든 재검토 가능.
@@ -104,6 +109,55 @@ NEWSAPI_QUERIES: dict[str, list[tuple[str, str | None]]] = {
 }
 
 _HANGUL_RE = re.compile(r"[가-힣]")
+
+# 2026-09-16: "한국 뉴스도 많이 모아야됨" — NewsAPI는 한국 매체 커버리지가 약해서
+# (language="ko" 자체를 지원 안 함, 한국어 쿼리로 유도해도 결과가 영어권 위주) 네이버 뉴스
+# 검색 API를 추가함. 국내 매체 커버리지가 훨씬 좋고 sort=date로 최신순 정렬도 확실함.
+# 개발자센터(developers.naver.com)에서 애플리케이션 등록 후 Client ID/Secret 무료 발급.
+# 가입 시점에 콘솔에서 일일 호출 한도를 꼭 확인할 것(과거엔 25,000회/일이었으나 바뀌었을 수 있음).
+NAVER_CLIENT_ID = os.environ.get("NAVER_CLIENT_ID", "").strip()
+NAVER_CLIENT_SECRET = os.environ.get("NAVER_CLIENT_SECRET", "").strip()
+NAVER_NEWS_URL = "https://openapi.naver.com/v1/search/news.json"
+NAVER_NEWS_DISPLAY = 100  # 요청당 최대치
+NAVER_NEWS_INTERVAL_SEC = 1  # 무료 한도 보호용 — 쿼리 8개면 초 단위로도 충분히 여유있음
+
+# 검색어는 한국어로 — NAVER는 한국 매체 전용이라 한국어 쿼리가 훨씬 잘 맞음.
+NAVER_NEWS_QUERIES: dict[str, list[str]] = {
+    "저작권": ["AI 음악 저작권", "생성형 AI 음악 저작권 침해"],
+    "창작자성": ["AI 창작물 저작자", "인공지능 창작 주체성"],
+    "음성복제": ["AI 음성복제", "딥페이크 보이스 논란"],
+    "AI작곡": ["생성형 AI 작곡", "수노 유디오 AI 음악"],
+}
+
+_TAG_RE = re.compile(r"</?b>")
+
+
+def _clean_naver_text(raw: str) -> str:
+    """title/description에 검색어 강조용 <b> 태그 + HTML 엔티티(&quot; 등)가 섞여 나와서 정리."""
+    return unescape(_TAG_RE.sub("", raw or "")).strip()
+
+
+def _parse_naver_date(raw: str | None) -> date | None:
+    if not raw:
+        return None
+    try:
+        return parsedate_to_datetime(raw).date()
+    except (TypeError, ValueError):
+        return None
+
+
+def _fetch_naver_news(query: str) -> list[dict]:
+    resp = requests.get(
+        NAVER_NEWS_URL,
+        params={"query": query, "display": NAVER_NEWS_DISPLAY, "sort": "date"},
+        headers={
+            "X-Naver-Client-Id": NAVER_CLIENT_ID,
+            "X-Naver-Client-Secret": NAVER_CLIENT_SECRET,
+        },
+        timeout=10,
+    )
+    resp.raise_for_status()
+    return resp.json().get("items", [])
 
 
 def _detect_language(text: str) -> str:
@@ -156,29 +210,39 @@ def collect() -> list[dict]:
     for source_name, feed_url in FEEDS.items():
         parsed = feedparser.parse(feed_url)
         for entry in parsed.entries:
-            if entry.link in seen_urls:
+            # entry.link로 직접 접근하면 <link>가 없는 피드(예전 저작권위원회 RSS)에서
+            # AttributeError로 collect() 전체가 죽었던 버그가 있었음 — .get()으로 방어.
+            link = entry.get("link", "")
+            if not link or link in seen_urls:
                 continue
 
             try:
-                content = _extract_body(entry.link)
+                content = _extract_body(link)
             except Exception as e:  # noqa: BLE001 — 수집 단계에서는 개별 실패를 건너뛰고 계속 진행
-                print(f"[news_collector] {entry.link} 수집 실패: {e}")
+                print(f"[news_collector] {link} 수집 실패: {e}")
                 continue
 
             if is_too_short(content):
-                print(f"[news_collector] {entry.link} 본문이 너무 짧아 스킵 ({len(content)}자)")
+                print(f"[news_collector] {link} 본문이 너무 짧아 스킵 ({len(content)}자)")
                 continue
 
-            seen_urls.add(entry.link)
+            seen_urls.add(link)
+            published_at = date.today()
+            if entry.get("published_parsed"):
+                try:
+                    published_at = date(*entry.published_parsed[:3])
+                except (TypeError, ValueError):
+                    pass
+
             results.append(
                 {
                     "title": entry.get("title", ""),
                     "content": content,
-                    "url": entry.link,
+                    "url": link,
                     "author": entry.get("author", None),
                     "category": CATEGORY_HINT_DEFAULT,
                     "document_type": "news",
-                    "published_at": date.today(),  # TODO: entry.published_parsed 파싱해서 실제 발행일로 교체
+                    "published_at": published_at,
                     "language": FEED_LANGUAGE.get(source_name, "ko"),
                     "source_name": source_name,
                 }
@@ -187,52 +251,102 @@ def collect() -> list[dict]:
     # NewsAPI — NEWSAPI_KEY(.env) 없으면 건너뜀 (case_collector.py와 동일 패턴)
     if not NEWSAPI_KEY:
         print("[news_collector] NEWSAPI_KEY 미설정 — NewsAPI 검색 건너뜀 (newsapi.org 가입 후 .env에 추가할 것)")
-        return results
-
-    for category, queries in NEWSAPI_QUERIES.items():
-        for query, language in queries:
-            try:
-                articles = _fetch_newsapi(query, language)
-            except Exception as e:  # noqa: BLE001 — 한 쿼리 실패해도 나머지는 계속 진행
-                print(f"[news_collector] NewsAPI '{query}' 조회 실패: {e}")
-                continue
-
-            for article in articles:
-                url = article.get("url")
-                # NewsAPI는 원문이 내려간 기사를 title/source.name="[Removed]", url="https://removed.com"
-                # 으로 채워서 그대로 돌려줌 — 실제 내용이 없으니 미리 걸러냄(안 걸러도 _extract_body에서
-                # 실패하긴 하겠지만, 매번 불필요한 요청을 보내는 걸 막기 위해 여기서 먼저 체크).
-                if not url or url in seen_urls or article.get("title") == "[Removed]":
-                    continue
-
+    else:
+        for category, queries in NEWSAPI_QUERIES.items():
+            for query, language in queries:
                 try:
-                    content = _extract_body(url)
+                    articles = _fetch_newsapi(query, language)
+                except Exception as e:  # noqa: BLE001 — 한 쿼리 실패해도 나머지는 계속 진행
+                    print(f"[news_collector] NewsAPI '{query}' 조회 실패: {e}")
+                    continue
+
+                for article in articles:
+                    url = article.get("url")
+                    # NewsAPI는 원문이 내려간 기사를 title/source.name="[Removed]", url="https://removed.com"
+                    # 으로 채워서 그대로 돌려줌 — 실제 내용이 없으니 미리 걸러냄(안 걸러도 _extract_body에서
+                    # 실패하긴 하겠지만, 매번 불필요한 요청을 보내는 걸 막기 위해 여기서 먼저 체크).
+                    if not url or url in seen_urls or article.get("title") == "[Removed]":
+                        continue
+
+                    try:
+                        content = _extract_body(url)
+                    except Exception as e:  # noqa: BLE001
+                        print(f"[news_collector] {url} 수집 실패: {e}")
+                        continue
+
+                    if is_too_short(content):
+                        print(f"[news_collector] {url} 본문이 너무 짧아 스킵 ({len(content)}자)")
+                        continue
+
+                    seen_urls.add(url)
+                    title = article.get("title") or ""
+                    source_label = (article.get("source") or {}).get("name") or "알 수 없음"
+                    results.append(
+                        {
+                            "title": title,
+                            "content": content,
+                            "url": url,
+                            "author": article.get("author"),
+                            "category": category,
+                            "document_type": "news",
+                            "published_at": _parse_newsapi_date(article.get("publishedAt")),
+                            "language": _detect_language(title + " " + content[:200]),
+                            "source_name": f"NewsAPI: {source_label}",
+                        }
+                    )
+
+                time.sleep(NEWSAPI_INTERVAL_SEC)
+
+    # 네이버 뉴스 검색 API — NAVER_CLIENT_ID/SECRET(.env) 없으면 건너뜀
+    if not (NAVER_CLIENT_ID and NAVER_CLIENT_SECRET):
+        print(
+            "[news_collector] NAVER_CLIENT_ID/NAVER_CLIENT_SECRET 미설정 — 네이버 뉴스 검색 건너뜀 "
+            "(developers.naver.com 애플리케이션 등록 후 .env에 추가할 것)"
+        )
+    else:
+        for category, queries in NAVER_NEWS_QUERIES.items():
+            for query in queries:
+                try:
+                    items = _fetch_naver_news(query)
                 except Exception as e:  # noqa: BLE001
-                    print(f"[news_collector] {url} 수집 실패: {e}")
+                    print(f"[news_collector] 네이버뉴스 '{query}' 조회 실패: {e}")
                     continue
 
-                if is_too_short(content):
-                    print(f"[news_collector] {url} 본문이 너무 짧아 스킵 ({len(content)}자)")
-                    continue
+                for item in items:
+                    # originallink(실제 언론사 원문)을 우선 사용 — link는 네이버뉴스 미러 URL이라
+                    # 원문이 더 안정적인 출처 표시가 됨. 일부 기사는 originallink가 비어있어서 폴백.
+                    url = item.get("originallink") or item.get("link")
+                    if not url or url in seen_urls:
+                        continue
 
-                seen_urls.add(url)
-                title = article.get("title") or ""
-                source_label = (article.get("source") or {}).get("name") or "알 수 없음"
-                results.append(
-                    {
-                        "title": title,
-                        "content": content,
-                        "url": url,
-                        "author": article.get("author"),
-                        "category": category,
-                        "document_type": "news",
-                        "published_at": _parse_newsapi_date(article.get("publishedAt")),
-                        "language": _detect_language(title + " " + content[:200]),
-                        "source_name": f"NewsAPI: {source_label}",
-                    }
-                )
+                    try:
+                        content = _extract_body(url)
+                    except Exception as e:  # noqa: BLE001
+                        print(f"[news_collector] {url} 수집 실패: {e}")
+                        continue
 
-            time.sleep(NEWSAPI_INTERVAL_SEC)
+                    if is_too_short(content):
+                        print(f"[news_collector] {url} 본문이 너무 짧아 스킵 ({len(content)}자)")
+                        continue
+
+                    seen_urls.add(url)
+                    title = _clean_naver_text(item.get("title", ""))
+                    domain = urlparse(url).netloc.replace("www.", "")
+                    results.append(
+                        {
+                            "title": title,
+                            "content": content,
+                            "url": url,
+                            "author": None,
+                            "category": category,
+                            "document_type": "news",
+                            "published_at": _parse_naver_date(item.get("pubDate")),
+                            "language": "ko",
+                            "source_name": f"네이버뉴스: {domain}",
+                        }
+                    )
+
+                time.sleep(NAVER_NEWS_INTERVAL_SEC)
 
     return results
 
