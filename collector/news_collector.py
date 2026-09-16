@@ -150,8 +150,9 @@ _HANGUL_RE = re.compile(r"[가-힣]")
 NAVER_CLIENT_ID = os.environ.get("NAVER_CLIENT_ID", "").strip()
 NAVER_CLIENT_SECRET = os.environ.get("NAVER_CLIENT_SECRET", "").strip()
 NAVER_NEWS_URL = "https://naverapihub.apigw.ntruss.com/search/v1/news"
-NAVER_NEWS_DISPLAY = 20  # 2026-09-16: 100 -> 20, NewsAPI와 같은 이유(본문 fetch 건수 절감).
-# sort=date라 상위 20건이 최신 20건 그대로임 — 손해 없이 요청당 HTTP 요청 수만 줄어듦.
+NAVER_NEWS_DISPLAY = 100  # 요청당 최대치 — 데이터는 많을수록 좋다는 방침이라 축소하지 않음.
+# 2026-09-16: 한때 20으로 줄였다가 되돌림. 대신 _load_known_urls()로 이미 DB에 있는
+# url은 fetch 자체를 건너뛰게 해서, 볼륨은 유지하면서 중복 재수집만 막음.
 NAVER_NEWS_INTERVAL_SEC = 1  # 무료 한도 보호용 — 쿼리 8개면 초 단위로도 충분히 여유있음
 
 # 검색어는 한국어로 — NAVER는 한국 매체 전용이라 한국어 쿼리가 훨씬 잘 맞음.
@@ -209,16 +210,13 @@ def _parse_newsapi_date(raw: str | None) -> date | None:
 
 
 def _fetch_newsapi(query: str, language: str | None) -> list[dict]:
-    # 2026-09-16: pageSize 100 -> 20. 쿼리 하나당 결과 100건을 전부 _extract_body()로
-    # 본문까지 긁다 보니(요청 하나에 최대 100번의 개별 페이지 요청) 쿼리 8개 합치면 최악의
-    # 경우 최대 800건 fetch — Airflow news DAG가 1시간 넘게 걸리던 주된 원인으로 추정됨.
-    # sortBy=publishedAt라 상위 20건이 그대로 최신 20건이라 "최신 위주로 모은다"는
-    # 목적엔 손해가 없고(그날 진짜 새 기사가 20건보다 많으면 다음 실행 때 마저 잡힘), 페이지당
-    # HTTP 요청 수만 최대 5분의 1로 줄어듦.
+    # 데이터는 많을수록 좋다는 방침이라 pageSize는 최대치(100) 유지.
+    # 2026-09-16: 한때 20으로 줄였다가 되돌림 — 대신 _load_known_urls()로 이미 DB에
+    # 있는 url은 fetch 자체를 건너뛰게 해서, 볼륨은 유지하면서 중복 재수집만 막음.
     params = {
         "q": query,
         "sortBy": "publishedAt",
-        "pageSize": 20,
+        "pageSize": 100,
         "apiKey": NEWSAPI_KEY,
     }
     if language:
