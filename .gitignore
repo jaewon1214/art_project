@@ -8,3 +8,5 @@ rag/data/**/*.pdf
 collector/airflow/logs/
 collector/airflow/plugins/
 collector/airflow/.env
+rag/eval_results/
+rag/exports/

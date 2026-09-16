@@ -66,10 +66,17 @@ def _split(text: str, size: int = CHUNK_SIZE_CHARS) -> list[str]:
     return pieces or [""]
 
 
+# 2026-09-16: 번역 호출이 응답 없이 오래 걸릴 때(네트워크 지연 등) 콘솔에 아무 표시도 없이
+# 멈춘 것처럼 보이는 문제가 있어서(재시도 로그만 찍히고 그 다음 API 응답을 기다리는 동안 아무
+# 출력이 없었음) 명시적 타임아웃 + 호출 전 로그를 추가함. 기본 SDK 타임아웃(10분)보다 훨씬
+# 짧게 잡아서, 진짜 멈춘 거면 오래 안 기다리고 바로 에러로 드러나게 함.
+_LLM_TIMEOUT_SEC = 30
+
+
 def _call_openai(text: str, system_prompt: str) -> str:
     from openai import OpenAI
 
-    client = OpenAI(api_key=LLM_API_KEY)
+    client = OpenAI(api_key=LLM_API_KEY, timeout=_LLM_TIMEOUT_SEC)
     resp = client.chat.completions.create(
         model=LLM_MODEL or "gpt-4o-mini",
         messages=[
@@ -84,7 +91,7 @@ def _call_openai(text: str, system_prompt: str) -> str:
 def _call_anthropic(text: str, system_prompt: str) -> str:
     from anthropic import Anthropic
 
-    client = Anthropic(api_key=LLM_API_KEY)
+    client = Anthropic(api_key=LLM_API_KEY, timeout=_LLM_TIMEOUT_SEC)
     resp = client.messages.create(
         model=LLM_MODEL or "claude-haiku-4-5",
         max_tokens=4096,
@@ -103,17 +110,26 @@ def _call_llm(text: str, system_prompt: str) -> str:
     raise NotImplementedError(f"'{LLM_PROVIDER}' provider 구현 필요 (preprocessing/translate.py)")
 
 
-def _translate_piece(piece: str) -> str:
+def _translate_piece(piece: str, piece_no: int = 1, total_pieces: int = 1) -> str:
     """piece 하나를 번역하고, 결과에 원문 그대로 남은 문장이 있으면 최대 _MAX_TRANSLATE_RETRIES번
     "다시 번역해라" 프롬프트로 재시도. 그래도 남아있으면 마지막 결과를 그냥 반환(완벽하진 않아도
     최소한 대부분은 번역된 상태 — 번역 실패로 파이프라인 전체를 막지는 않음)."""
+    print(f"[translate] 조각 {piece_no}/{total_pieces} 번역 요청 중... ({len(piece)}자)")
     result = _call_llm(piece, _SYSTEM_PROMPT)
     for attempt in range(_MAX_TRANSLATE_RETRIES):
         remaining = _count_untranslated_sentences(result)
         if remaining == 0:
             break
-        print(f"[translate] 번역 결과에 원문 문장 {remaining}개 잔존 — 재시도 ({attempt + 1}/{_MAX_TRANSLATE_RETRIES})")
+        print(
+            f"[translate] 조각 {piece_no}/{total_pieces}: 번역 결과에 원문 문장 {remaining}개 잔존 — "
+            f"재시도 요청 중... ({attempt + 1}/{_MAX_TRANSLATE_RETRIES})"
+        )
         result = _call_llm(piece, _RETRY_SYSTEM_PROMPT)
+    else:
+        # for-else: 마지막 재시도까지 다 돌고도 못 벗어났으면(break 없이 루프 종료) 마지막 상태를 알려줌
+        remaining = _count_untranslated_sentences(result)
+        if remaining > 0:
+            print(f"[translate] 조각 {piece_no}/{total_pieces}: 재시도 소진, 원문 문장 {remaining}개 남은 채로 진행")
     return result
 
 
@@ -127,11 +143,10 @@ def translate_to_korean(text: str) -> str:
     if not text or not LLM_PROVIDER:
         return text
 
+    pieces = [p for p in _split(text) if p.strip()]
     translated: list[str] = []
-    for piece in _split(text):
-        if not piece.strip():
-            continue
-        translated.append(_translate_piece(piece))
+    for i, piece in enumerate(pieces, start=1):
+        translated.append(_translate_piece(piece, piece_no=i, total_pieces=len(pieces)))
 
     return "\n\n".join(translated) if translated else text
 

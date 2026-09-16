@@ -166,7 +166,16 @@ def main() -> None:
                 skipped_already_ko += 1
                 note = "원문이 이미 한글 위주라 번역 없이 갱신"
             else:
-                new_content = translate_to_korean(raw)
+                # 2026-09-16: 이 호출이 실패(타임아웃/API 에러)하면 예전엔 예외가 그대로 위로
+                # 튀어서 main() 전체가 죽고 나머지 후보들을 아예 처리 못 했음 — 문서 하나 번역
+                # 실패해도 나머지는 계속 진행되게 try/except로 감쌈(다른 단계들과 동일 패턴).
+                try:
+                    new_content = translate_to_korean(raw)
+                except Exception as e:  # noqa: BLE001
+                    print(f"[retranslate] {doc_id} ({doc_type}, {url}): 번역 실패({e}) — 스킵")
+                    failed.append((url, f"번역 실패: {e}"))
+                    time.sleep(REFETCH_INTERVAL_SEC)
+                    continue
                 note = "재번역 완료"
 
             new_hash = content_hash(raw)  # ingest.py와 동일하게 "번역 전 원문" 기준 해시
