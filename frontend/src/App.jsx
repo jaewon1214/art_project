@@ -10,7 +10,7 @@ function App() {
     "생성형 AI와 음악 창작의 저작권 및 창작자성"
   );
 
-  const [length, setLength] = useState(5000);
+  const [length, setLength] = useState(4500);
 
   const [paper, setPaper] = useState(null);
   const [loading, setLoading] = useState(false);

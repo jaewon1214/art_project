@@ -21,7 +21,7 @@ def test_build_prompt() -> None:
 
         prompt_value = await chain.build_prompt(
             topic=topic,
-            length=5000,
+            length=4500,
             rag_result=rag_result,
             draft=draft,
         )
@@ -85,7 +85,7 @@ def test_prompt_preserves_rag_trace_metadata() -> None:
 
         prompt_value = await chain.build_prompt(
             topic=topic,
-            length=5000,
+            length=4500,
             rag_result=rag_result,
             draft=draft,
         )

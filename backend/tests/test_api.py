@@ -62,7 +62,7 @@ def test_generate() -> None:
         "/api/v1/generate",
         json={
             "topic": "생성형 AI 음악의 음성복제와 저작권",
-            "length": 5000,
+            "length": 4500,
         },
     )
 
@@ -128,7 +128,7 @@ def test_generate_topic_too_short() -> None:
         "/api/v1/generate",
         json={
             "topic": "AI",
-            "length": 5000,
+            "length": 4500,
         },
     )
 
