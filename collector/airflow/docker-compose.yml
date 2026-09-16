@@ -31,7 +31,8 @@ services:
       # 7일 스프린트 용도로는 충분). 루트 pyproject.toml의 dependencies와 맞춰둘 것.
       _PIP_ADDITIONAL_REQUIREMENTS: >-
         psycopg2-binary>=2.9 python-dotenv>=1.0 requests>=2.32 beautifulsoup4>=4.12
-        feedparser>=6.0 neo4j>=5.0 openai>=1.0 anthropic>=0.34 pypdf>=4.0
+        feedparser>=6.0 neo4j>=5.0 openai>=1.0,<2.0 anthropic>=0.34,<1.0 pypdf>=4.0
+        aiohttp>=3.10,<4.0 kiwipiepy>=0.18
     ports:
       - "${AIRFLOW_PORT:-8080}:8080"
     volumes:
