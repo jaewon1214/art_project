@@ -113,11 +113,18 @@ _HANGUL_RE = re.compile(r"[가-힣]")
 # 2026-09-16: "한국 뉴스도 많이 모아야됨" — NewsAPI는 한국 매체 커버리지가 약해서
 # (language="ko" 자체를 지원 안 함, 한국어 쿼리로 유도해도 결과가 영어권 위주) 네이버 뉴스
 # 검색 API를 추가함. 국내 매체 커버리지가 훨씬 좋고 sort=date로 최신순 정렬도 확실함.
-# 개발자센터(developers.naver.com)에서 애플리케이션 등록 후 Client ID/Secret 무료 발급.
-# 가입 시점에 콘솔에서 일일 호출 한도를 꼭 확인할 것(과거엔 25,000회/일이었으나 바뀌었을 수 있음).
+#
+# 주의: 예전엔 개발자센터(developers.naver.com)에서 바로 발급받는 구조였는데, 2026년에
+# 검색 API가 "NAVER API HUB"(네이버클라우드플랫폼 산하)로 이관되면서 발급 경로/엔드포인트/
+# 인증 헤더가 전부 바뀜(개발자센터 쪽엔 이제 "검색" 항목 자체가 없어서 헷갈리기 쉬움).
+#   - 발급: https://www.ncloud.com/product/applicationService/naverApiHub 에서
+#     "신청하기" -> 네이버클라우드플랫폼(NCP) 계정으로 로그인/가입 -> Application 등록
+#   - 무료 한도: 일 25,000건 (2026-09-16 기준, 콘솔에서 재확인 권장)
+#   - 기존 openapi.naver.com 키는 2027-06-30까지만 유효 — 새로 받는 거면 처음부터
+#     API HUB 쪽으로 받을 것(아래 코드도 API HUB 엔드포인트/헤더 기준으로 작성함).
 NAVER_CLIENT_ID = os.environ.get("NAVER_CLIENT_ID", "").strip()
 NAVER_CLIENT_SECRET = os.environ.get("NAVER_CLIENT_SECRET", "").strip()
-NAVER_NEWS_URL = "https://openapi.naver.com/v1/search/news.json"
+NAVER_NEWS_URL = "https://naverapihub.apigw.ntruss.com/search/v1/news"
 NAVER_NEWS_DISPLAY = 100  # 요청당 최대치
 NAVER_NEWS_INTERVAL_SEC = 1  # 무료 한도 보호용 — 쿼리 8개면 초 단위로도 충분히 여유있음
 
@@ -151,8 +158,8 @@ def _fetch_naver_news(query: str) -> list[dict]:
         NAVER_NEWS_URL,
         params={"query": query, "display": NAVER_NEWS_DISPLAY, "sort": "date"},
         headers={
-            "X-Naver-Client-Id": NAVER_CLIENT_ID,
-            "X-Naver-Client-Secret": NAVER_CLIENT_SECRET,
+            "X-NCP-APIGW-API-KEY-ID": NAVER_CLIENT_ID,
+            "X-NCP-APIGW-API-KEY": NAVER_CLIENT_SECRET,
         },
         timeout=10,
     )
