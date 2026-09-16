@@ -18,6 +18,12 @@ precision@k를 계산 — 데이터가 늘어날 때마다(또는 검색 로직�
 
 결과는 rag/eval_results/eval_YYYYMMDD_HHMMSS.json 로 저장됨 — 나중에 검색 로직을
 바꾼 뒤 다시 돌려서 이전 파일과 precision 수치를 비교해보면 됨.
+
+2026-09-16: 라벨링 결과를 쿼리당 bare int 리스트("labels": [1,0,1,...])로만 남기던 걸
+청크별 레코드("chunk_results": [{chunk_id, document_id, title, score, label}, ...])로
+바꿈 — 어떤 청크가 관련없다고 판정됐는지 나중에 다시 열어봐도 바로 추적 가능하게 하기 위함
+(전엔 순서만 보고 어떤 청크였는지 역추적해야 했음). precision_at_k 계산 방식/의미는 그대로라
+이전 결과 파일과 precision 수치 비교는 계속 유효함.
 """
 from __future__ import annotations
 
@@ -56,8 +62,12 @@ SNIPPET_LEN = 1000  # 2026-09-16: 150 -> 1000 (청크가 600단어로 커져서 
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "eval_results"
 
 
-def _label_result(i: int, ctx: dict, source: dict) -> int:
-    """검색 결과 하나를 화면에 보여주고 사람한테 관련성(y/n)을 물어봐서 1/0으로 반환.
+def _label_result(i: int, ctx: dict, source: dict) -> dict:
+    """검색 결과(청크 하나)를 화면에 보여주고 사람한테 관련성(y/n)을 물어봐서, 그 청크를
+    나중에도 추적할 수 있도록 chunk_id/document_id 등 메타데이터를 라벨과 함께 dict로 반환.
+
+    2026-09-16: 라벨만 반환하던 걸 청크별 레코드로 바꿈 — 결과 JSON을 나중에 다시 열어봤을 때
+    "5개 중 3번째가 0이었다"가 아니라 "이 chunk_id가 관련없다고 판정됐다"를 바로 알 수 있게 함.
 
     청크가 600단어 단위라 SNIPPET_LEN(1000자)도 넘는 경우가 있음 — 그럴 땐 끝에 [이하 생략]
     표시로 잘렸다는 걸 명확히 알려줌(예전처럼 "..."만 붙이면 문장이 중간에 끊긴 건지 실제로
@@ -78,10 +88,18 @@ def _label_result(i: int, ctx: dict, source: dict) -> int:
 
     while True:
         answer = input("      이 결과가 쿼리와 관련 있나요? (y/n/s=건너뛰기): ").strip().lower()
-        if answer in ("y", "n"):
-            return 1 if answer == "y" else 0
-        if answer == "s":
-            return -1  # 건너뛴 항목은 precision 계산에서 제외
+        if answer in ("y", "n", "s"):
+            label = 1 if answer == "y" else 0 if answer == "n" else -1  # s(건너뛰기)는 precision 계산에서 제외
+            return {
+                "rank": i,
+                "chunk_id": ctx.get("chunk_id"),
+                "document_id": ctx.get("document_id"),
+                "title": source.get("title"),
+                "url": source.get("url"),
+                "category": source.get("category"),
+                "score": ctx["score"],
+                "label": label,
+            }
         print("      y, n, s 중 하나로 입력해주세요.")
 
 
@@ -99,7 +117,7 @@ def _evaluate_query(category: str, query: str) -> dict:
             "category": category,
             "query": query,
             "error": str(e),
-            "labels": [],
+            "chunk_results": [],
             "precision_at_k": None,
         }
     elapsed = time.time() - start
@@ -113,18 +131,18 @@ def _evaluate_query(category: str, query: str) -> dict:
             "category": category,
             "query": query,
             "elapsed_sec": round(elapsed, 2),
-            "labels": [],
+            "chunk_results": [],
             "precision_at_k": None,
         }
 
     print(f"  ({elapsed:.2f}초, {len(contexts)}건)")
 
-    labels = []
+    chunk_results = []
     for i, ctx in enumerate(contexts[:TOP_K], start=1):
         src = sources.get(ctx["document_id"], {})
-        labels.append(_label_result(i, ctx, src))
+        chunk_results.append(_label_result(i, ctx, src))
 
-    scored = [l for l in labels if l != -1]
+    scored = [c["label"] for c in chunk_results if c["label"] != -1]
     precision = sum(scored) / len(scored) if scored else None
 
     if precision is not None:
@@ -137,7 +155,7 @@ def _evaluate_query(category: str, query: str) -> dict:
         "query": query,
         "elapsed_sec": round(elapsed, 2),
         "num_results": len(contexts),
-        "labels": labels,
+        "chunk_results": chunk_results,
         "precision_at_k": precision,
     }
 
