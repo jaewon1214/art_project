@@ -19,9 +19,25 @@ egress allowlist에 없으면 막힐 수 있음. 일반 PC/서버 환경에서�
   (발급되면 .env에 SEMANTIC_SCHOLAR_API_KEY로 넣고 헤더에 실어서 rate limit 완화).
 - arXiv에 없는 저널/학회 논문까지 커버하고 인용수(citationCount)도 같이 줌.
 - arXiv랑 겹치는 논문은 externalIds.ArXiv 값으로 걸러서 중복 저장 방지.
+
+[OpenAlex] (2026-09-16 추가)
+공식 문서: https://docs.openalex.org/
+- 키 불필요, 완전 무료. 예전 Microsoft Academic Graph를 이어받은 오픈 학술 그래프로,
+  arXiv/Semantic Scholar 둘 다 안 잡는 저널·학회 논문까지 커버 범위가 훨씬 넓음. Semantic
+  Scholar가 공유 풀이라 429(rate limit)로 쿼리가 통째로 날아가는 일이 잦았던 것과 달리,
+  OpenAlex는 기본 풀(초당 10회)만으로도 이 프로젝트 요청량(8쿼리 x 최대 2페이지)엔 충분히
+  여유로움 — Semantic Scholar가 막히는 날의 보완재 역할도 함.
+- .env에 OPENALEX_MAILTO=<이메일>을 넣으면 "polite pool"로 승격돼 더 넉넉한 한도를 받음
+  (선택사항 — 없어도 기본 풀로 정상 동작).
+- abstract는 원문이 아니라 abstract_inverted_index(단어->위치 인덱스) 형태로 옴 —
+  _reconstruct_abstract()로 원래 문장 순서로 복원해서 씀. 이 필드가 아예 없는(초록 비공개)
+  논문은 content가 없어서 스킵.
+- DOI가 "10.48550/arXiv.XXXX" 형태면 arXiv 프리프린트를 OpenAlex가 다시 색인한 것 —
+  seen_arxiv_ids로 걸러서 중복 저장 방지(Semantic Scholar와 동일한 패턴).
 """
 from __future__ import annotations
 
+import os
 import re
 import time
 from datetime import date, datetime
@@ -29,9 +45,16 @@ from urllib.parse import quote
 
 import feedparser  # pip install feedparser
 import requests  # pip install requests
+from dotenv import load_dotenv  # pip install python-dotenv
+
+# news_collector.py/case_collector.py와 동일한 이유로 직접 로드 — 이 모듈은 database.config를
+# 안 거치는 독립 모듈이라 .env가 자동으로는 안 읽힘.
+load_dotenv()
 
 ARXIV_API = "http://export.arxiv.org/api/query"
 SEMANTIC_SCHOLAR_API = "https://api.semanticscholar.org/graph/v1/paper/search"
+OPENALEX_API = "https://api.openalex.org/works"
+OPENALEX_MAILTO = os.environ.get("OPENALEX_MAILTO", "").strip()  # 선택 — 있으면 polite pool로 승격
 
 # 2026-09-16: "최신 데이터 위주로 수집" 전략 — 오래된 논문이 검색 결과 상위를 차지해서
 # 최신 논문이 덜 잡히는 문제를 줄이기 위해 연도 필터를 추가. arXiv/Semantic Scholar 둘 다
@@ -107,6 +130,10 @@ SEMANTIC_SCHOLAR_INTERVAL_SEC = 4  # 3 -> 4, 안전마진 더 둠
 SEMANTIC_SCHOLAR_MAX_RETRIES = 3
 SEMANTIC_SCHOLAR_RETRY_BACKOFF_SEC = 5  # 429 맞으면 5, 10, 20초... 늘려가며 재시도
 
+OPENALEX_MAX_RESULTS = 100  # per-page 최대치
+OPENALEX_MAX_PAGES = 2  # 쿼리당 최대 200건 — Semantic Scholar와 동일한 상한
+OPENALEX_INTERVAL_SEC = 1  # 기본 풀 기준(초당 10회)으로도 충분히 여유있는 간격
+
 
 def _fetch_query(query: str) -> list:
     # PAPER_YEAR_FROM 이후로 제출된 논문만 — arXiv 날짜 범위 문법은 YYYYMMDDHHMMSS 14자리.
@@ -176,11 +203,65 @@ def _fetch_semantic_scholar_paginated(query: str) -> list[dict]:
     return all_papers
 
 
+def _fetch_openalex(query: str, page: int) -> list[dict]:
+    params = {
+        "search": query,
+        "filter": f"from_publication_date:{PAPER_YEAR_FROM}-01-01",
+        "sort": "publication_date:desc",
+        "per-page": OPENALEX_MAX_RESULTS,
+        "page": page,
+    }
+    if OPENALEX_MAILTO:
+        params["mailto"] = OPENALEX_MAILTO  # polite pool 승격용(선택)
+    resp = requests.get(OPENALEX_API, params=params, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+    resp.raise_for_status()
+    return resp.json().get("results", [])
+
+
+def _fetch_openalex_paginated(query: str) -> list[dict]:
+    """OPENALEX_MAX_PAGES까지 page 파라미터로 페이지네이션 — Semantic Scholar와 동일한 패턴."""
+    all_works: list[dict] = []
+    for page in range(1, OPENALEX_MAX_PAGES + 1):
+        works = _fetch_openalex(query, page)
+        all_works.extend(works)
+        if len(works) < OPENALEX_MAX_RESULTS:
+            break
+        if page < OPENALEX_MAX_PAGES:
+            time.sleep(OPENALEX_INTERVAL_SEC)
+    return all_works
+
+
 def _arxiv_short_id(raw_id: str) -> str:
     """arXiv entry id('http://arxiv.org/abs/2309.01234v1')에서 순수 ID('2309.01234')만 뽑음.
     Semantic Scholar의 externalIds.ArXiv 값과 비교해서 중복을 걸러내는 데 씀."""
     tail = raw_id.rstrip("/").rsplit("/", 1)[-1]
     return tail.split("v")[0] if "v" in tail else tail
+
+
+_OPENALEX_ARXIV_DOI_RE = re.compile(r"48550/arxiv\.([a-z0-9.]+)", re.IGNORECASE)
+
+
+def _reconstruct_abstract(inverted_index: dict | None) -> str:
+    """OpenAlex는 저작권 문제로 초록 원문을 안 주고 abstract_inverted_index(단어 -> 등장 위치
+    리스트)만 줌 — 위치 기준으로 정렬해서 원래 문장으로 복원. 이 필드가 없으면(초록 비공개
+    논문) 빈 문자열 반환 — 호출부에서 content 없는 항목으로 스킵됨."""
+    if not inverted_index:
+        return ""
+    positions: list[tuple[int, str]] = []
+    for word, idxs in inverted_index.items():
+        for idx in idxs:
+            positions.append((idx, word))
+    positions.sort(key=lambda p: p[0])
+    return " ".join(word for _, word in positions)
+
+
+def _openalex_arxiv_id(doi: str | None) -> str | None:
+    """OpenAlex work의 doi가 "https://doi.org/10.48550/arXiv.2309.01234" 형태면 arXiv
+    프리프린트를 다시 색인한 것 — seen_arxiv_ids와 비교할 순수 arXiv ID만 뽑아서 반환."""
+    if not doi:
+        return None
+    m = _OPENALEX_ARXIV_DOI_RE.search(doi)
+    return m.group(1) if m else None
 
 
 def collect() -> list[dict]:
@@ -326,6 +407,62 @@ def collect() -> list[dict]:
                 )
 
             time.sleep(SEMANTIC_SCHOLAR_INTERVAL_SEC)
+
+    # ---------------- OpenAlex ----------------
+    # 쿼리 세트는 Semantic Scholar와 동일하게 재사용 — 둘 다 필드검색 문법(arXiv의 abs: 같은)
+    # 없이 일반 키워드로 검색하는 API라 같은 쿼리 문구를 그대로 쓸 수 있음.
+    for category, queries in SEMANTIC_SCHOLAR_QUERIES.items():
+        for query in queries:
+            try:
+                works = _fetch_openalex_paginated(query)
+            except Exception as e:  # noqa: BLE001 — 한 쿼리 실패해도 나머지는 계속 진행
+                print(f"[paper_collector] OpenAlex '{category}' 쿼리 실패: {e}")
+                continue
+
+            for work in works:
+                abstract = _reconstruct_abstract(work.get("abstract_inverted_index"))
+                if not abstract:
+                    continue  # 초록 비공개 항목은 스킵 (content 필수)
+
+                arxiv_id = _openalex_arxiv_id(work.get("doi"))
+                if arxiv_id and arxiv_id in seen_arxiv_ids:
+                    continue  # arXiv에서 이미 수집한 프리프린트와 중복
+
+                published_at = date.today()
+                pub_date = work.get("publication_date")
+                if pub_date:
+                    try:
+                        published_at = datetime.strptime(pub_date, "%Y-%m-%d").date()
+                    except ValueError:
+                        pass
+                elif work.get("publication_year"):
+                    published_at = date(int(work["publication_year"]), 1, 1)
+
+                authors = (
+                    ", ".join(
+                        (a.get("author") or {}).get("display_name", "")
+                        for a in work.get("authorships", [])
+                    ).strip(", ")
+                    or None
+                )
+
+                url = work.get("doi") or work.get("id") or ""
+
+                results.append(
+                    {
+                        "title": (work.get("title") or work.get("display_name") or "").strip(),
+                        "content": abstract,
+                        "url": url,
+                        "author": authors,
+                        "category": category,
+                        "document_type": "paper",
+                        "published_at": published_at,
+                        "language": "en",
+                        "source_name": "OpenAlex",
+                    }
+                )
+
+            time.sleep(OPENALEX_INTERVAL_SEC)
 
     return results
 
