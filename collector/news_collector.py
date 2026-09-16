@@ -34,7 +34,12 @@ import requests
 from bs4 import BeautifulSoup  # pip install beautifulsoup4
 from dotenv import load_dotenv
 
-from rag.preprocessing.clean_html import is_too_short, normalize_whitespace, strip_noise_tags
+from rag.preprocessing.clean_html import (
+    is_too_short,
+    normalize_whitespace,
+    strip_boilerplate_lines,
+    strip_noise_tags,
+)
 
 from database.config import get_connection
 
@@ -230,14 +235,16 @@ def _fetch_newsapi(query: str, language: str | None) -> list[dict]:
 
 
 def _extract_body(url: str) -> str:
-    """기사 본문만 추출 — 광고/메뉴/스크립트는 clean_html.strip_noise_tags()로 먼저 제거."""
+    """기사 본문만 추출 — 광고/메뉴/스크립트는 clean_html.strip_noise_tags()로 먼저 제거.
+    2026-09-16: <article> 태그 안쪽에 class로만 박혀있는 카테고리 메뉴/바이라인/공유 위젯
+    (예: 데일리안)은 태그 기반 제거로 못 걸러져서 strip_boilerplate_lines()로 한 번 더 정리."""
     resp = requests.get(url, timeout=10, headers=_BROWSER_HEADERS)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
     strip_noise_tags(soup)
     article = soup.find("article") or soup.find("body")
     text = article.get_text(separator="\n", strip=True) if article else ""
-    return normalize_whitespace(text)
+    return normalize_whitespace(strip_boilerplate_lines(text))
 
 
 def _load_known_urls() -> set[str]:
