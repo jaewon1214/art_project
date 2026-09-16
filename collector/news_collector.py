@@ -55,6 +55,13 @@ FEEDS: dict[str, str] = {
     # 아래 collect()가 entry.link에 그대로 접근하면 AttributeError로 collect() 전체가 죽는 버그가
     # 있었음(실제로 한 번도 안 걸렸다면 이 소스가 그동안 빈 결과였거나 아직 안 돌려봤다는 뜻).
     # policy_collector.py에 목록 페이지 매칭까지 포함해서 제대로 옮겨 구현해뒀으니 그쪽을 볼 것.
+    # 2026-09-16: 뉴스와이어(newswire.co.kr) — 보도자료 배급사라 원래 RSS로 재배포되는 용도로
+    # 만들어진 곳(api.newswire.co.kr는 robots.txt가 전체 허용). 키/가입 없이 바로 쓸 수 있고
+    # 실시간(당일 몇 시간 단위)으로 갱신됨. "인공지능"/"음악" 전용 카테고리가 따로 있어서 주제
+    # 적중률도 기대할 만함 — 다만 보도자료 특성상 무관한 공연/행사 홍보성 글도 섞여 나옴
+    # (LLM 관련성판정 호출이 그만큼 더 늚 — LLM_PROVIDER 미설정이면 전부 그대로 저장되니 주의).
+    "뉴스와이어(인공지능)": "https://api.newswire.co.kr/rss/industry/615",
+    "뉴스와이어(음악)": "https://api.newswire.co.kr/rss/industry/1205",
 }
 
 # 매체별 실제 게재 언어 — pipeline.ingest의 번역 단계(document_type != "paper" and language != "ko"
@@ -67,6 +74,8 @@ FEED_LANGUAGE: dict[str, str] = {
     "Complete Music Update": "en",
     "Water & Music": "en",
     "The Trichordist": "en",
+    "뉴스와이어(인공지능)": "ko",
+    "뉴스와이어(음악)": "ko",
 }
 
 # 참고: 아래는 확인해봤지만 일부러 안 넣은 후보들 — 필요하면 언제든 재검토 가능.
