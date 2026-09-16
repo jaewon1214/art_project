@@ -36,6 +36,8 @@ from dotenv import load_dotenv
 
 from rag.preprocessing.clean_html import is_too_short, normalize_whitespace, strip_noise_tags
 
+from database.config import get_connection
+
 # 다른 collector들은 database.config/rag.config를 거치면서 load_dotenv()가 이미 호출되지만,
 # news_collector는 그걸 안 거치는 독립 모듈이라(case_collector.py에서 겪은 것과 같은 버그) 직접 호출.
 load_dotenv()
@@ -148,7 +150,8 @@ _HANGUL_RE = re.compile(r"[가-힣]")
 NAVER_CLIENT_ID = os.environ.get("NAVER_CLIENT_ID", "").strip()
 NAVER_CLIENT_SECRET = os.environ.get("NAVER_CLIENT_SECRET", "").strip()
 NAVER_NEWS_URL = "https://naverapihub.apigw.ntruss.com/search/v1/news"
-NAVER_NEWS_DISPLAY = 100  # 요청당 최대치
+NAVER_NEWS_DISPLAY = 20  # 2026-09-16: 100 -> 20, NewsAPI와 같은 이유(본문 fetch 건수 절감).
+# sort=date라 상위 20건이 최신 20건 그대로임 — 손해 없이 요청당 HTTP 요청 수만 줄어듦.
 NAVER_NEWS_INTERVAL_SEC = 1  # 무료 한도 보호용 — 쿼리 8개면 초 단위로도 충분히 여유있음
 
 # 검색어는 한국어로 — NAVER는 한국 매체 전용이라 한국어 쿼리가 훨씬 잘 맞음.
@@ -206,10 +209,16 @@ def _parse_newsapi_date(raw: str | None) -> date | None:
 
 
 def _fetch_newsapi(query: str, language: str | None) -> list[dict]:
+    # 2026-09-16: pageSize 100 -> 20. 쿼리 하나당 결과 100건을 전부 _extract_body()로
+    # 본문까지 긁다 보니(요청 하나에 최대 100번의 개별 페이지 요청) 쿼리 8개 합치면 최악의
+    # 경우 최대 800건 fetch — Airflow news DAG가 1시간 넘게 걸리던 주된 원인으로 추정됨.
+    # sortBy=publishedAt라 상위 20건이 그대로 최신 20건이라 "최신 위주로 모은다"는
+    # 목적엔 손해가 없고(그날 진짜 새 기사가 20건보다 많으면 다음 실행 때 마저 잡힘), 페이지당
+    # HTTP 요청 수만 최대 5분의 1로 줄어듦.
     params = {
         "q": query,
         "sortBy": "publishedAt",
-        "pageSize": 100,
+        "pageSize": 20,
         "apiKey": NEWSAPI_KEY,
     }
     if language:
@@ -233,9 +242,34 @@ def _extract_body(url: str) -> str:
     return normalize_whitespace(text)
 
 
+def _load_known_urls() -> set[str]:
+    """documents 테이블에 이미 저장된 url을 미리 불러와서, 이미 수집한 기사는
+    _extract_body() HTTP 요청 자체를 건너뛰기 위한 캐시.
+
+    2026-09-16 추가: 기존에는 seen_urls가 "이번 실행 안에서"만 중복을 걸렀고,
+    DB 레벨 중복(content_hash) 체크는 ingest_document() 안에서 본문을 이미 다
+    긁어온 뒤에야 일어났음 — 그래서 RSS/NewsAPI/네이버에서 매번 같은 기사가
+    다시 나와도 매일 똑같이 비싼 본문 fetch를 반복하고 있었음(뉴스 DAG가
+    거의 1시간 걸린 핵심 원인 중 하나). DB 연결이 안 되는 환경(로컬 개발 등)
+    에서는 그냥 빈 set을 반환해서 필터링 없이 기존 동작으로 안전하게 폴백.
+    """
+    try:
+        conn = get_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT url FROM documents WHERE url IS NOT NULL")
+                return {row[0] for row in cur.fetchall()}
+        finally:
+            conn.close()
+    except Exception as e:  # noqa: BLE001 — DB 불가 시 필터링 없이 계속 진행
+        print(f"[news_collector] 기존 url 목록 로드 실패(필터 없이 진행): {e}")
+        return set()
+
+
 def collect() -> list[dict]:
     results: list[dict] = []
     seen_urls: set[str] = set()
+    known_urls = _load_known_urls()  # 이미 DB에 있는 url은 본문 fetch 자체를 스킵
 
     for source_name, feed_url in FEEDS.items():
         parsed = feedparser.parse(feed_url)
@@ -243,7 +277,7 @@ def collect() -> list[dict]:
             # entry.link로 직접 접근하면 <link>가 없는 피드(예전 저작권위원회 RSS)에서
             # AttributeError로 collect() 전체가 죽었던 버그가 있었음 — .get()으로 방어.
             link = entry.get("link", "")
-            if not link or link in seen_urls:
+            if not link or link in seen_urls or link in known_urls:
                 continue
 
             try:
@@ -295,7 +329,7 @@ def collect() -> list[dict]:
                     # NewsAPI는 원문이 내려간 기사를 title/source.name="[Removed]", url="https://removed.com"
                     # 으로 채워서 그대로 돌려줌 — 실제 내용이 없으니 미리 걸러냄(안 걸러도 _extract_body에서
                     # 실패하긴 하겠지만, 매번 불필요한 요청을 보내는 걸 막기 위해 여기서 먼저 체크).
-                    if not url or url in seen_urls or article.get("title") == "[Removed]":
+                    if not url or url in seen_urls or url in known_urls or article.get("title") == "[Removed]":
                         continue
 
                     try:
@@ -346,7 +380,7 @@ def collect() -> list[dict]:
                     # originallink(실제 언론사 원문)을 우선 사용 — link는 네이버뉴스 미러 URL이라
                     # 원문이 더 안정적인 출처 표시가 됨. 일부 기사는 originallink가 비어있어서 폴백.
                     url = item.get("originallink") or item.get("link")
-                    if not url or url in seen_urls:
+                    if not url or url in seen_urls or url in known_urls:
                         continue
 
                     try:
