@@ -16,7 +16,7 @@ async def main() -> None:
 
     prompt_value = await chain.build_prompt(
         topic=topic,
-        length=5000,
+        length=4500,
         rag_result=rag_result,
         draft=draft,
     )

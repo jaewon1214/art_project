@@ -5,7 +5,11 @@ from backend.app.core.config import get_settings
 from backend.app.mocks.rag_mock import (
     search_context as mock_search_context,
 )
-from backend.app.schemas.rag import RagResult, Source
+from backend.app.schemas.rag import (
+    RagContext,
+    RagResult,
+    Source,
+)
 
 
 class RagService:
@@ -45,11 +49,17 @@ class RagService:
         raw_contexts = raw_result.get("contexts", [])
         raw_sources = raw_result.get("sources", [])
 
-        contexts: list[str] = []
+        contexts: list[RagContext] = []
 
         for context in raw_contexts:
+            # 기존 문자열 형식도 하위 호환
             if isinstance(context, str):
-                contexts.append(context)
+                if context.strip():
+                    contexts.append(
+                        RagContext(
+                            content=context,
+                        )
+                    )
                 continue
 
             if not isinstance(context, dict):
@@ -57,8 +67,29 @@ class RagService:
 
             content = context.get("content")
 
-            if content:
-                contexts.append(str(content))
+            if not content:
+                continue
+
+            chunk_id = context.get("chunk_id")
+            document_id = context.get("document_id")
+            score = context.get("score")
+
+            contexts.append(
+                RagContext(
+                    chunk_id=(
+                        str(chunk_id)
+                        if chunk_id is not None
+                        else None
+                    ),
+                    document_id=(
+                        str(document_id)
+                        if document_id is not None
+                        else None
+                    ),
+                    content=str(content),
+                    score=score,
+                )
+            )
 
         sources: list[Source] = []
 

@@ -6,7 +6,11 @@ from langchain_openai import ChatOpenAI
 from backend.app.core.config import get_settings
 from backend.app.llm.chains.paper_chain import PaperPromptChain
 from backend.app.schemas.llm import GeneratedPaperContent
-from backend.app.schemas.paper import FinalPaper, PaperSection
+from backend.app.schemas.paper import (
+    FinalPaper,
+    PaperCitation,
+    PaperSection,
+)
 from backend.app.schemas.rag import RagResult
 from backend.app.schemas.transformer import TransformerDraft
 
@@ -88,6 +92,7 @@ class OpenAILLMService:
         섹션 제목 비교를 위해
         대소문자와 공백을 제거한다.
         """
+
         return "".join(
             heading.strip().lower().split()
         )
@@ -100,12 +105,28 @@ class OpenAILLMService:
         [doc-1], doc-1 등의 citation 표현을
         동일한 source_id 형식으로 변환한다.
         """
+
         return (
             citation
             .strip()
             .strip("[]")
             .strip()
         )
+
+    @staticmethod
+    def _normalize_text(
+        text: str,
+    ) -> str:
+        """
+        claim_text가 실제 본문에 존재하는지
+        비교하기 위한 공백 정규화.
+        """
+
+        return re.sub(
+            r"\s+",
+            " ",
+            text,
+        ).strip()
 
     @classmethod
     def _sanitize_inline_citations(
@@ -141,8 +162,6 @@ class OpenAILLMService:
             content,
         )
 
-        # 잘못된 citation 제거 후 생길 수 있는
-        # 연속 공백을 하나로 정리한다.
         cleaned = re.sub(
             r"[ \t]{2,}",
             " ",
@@ -196,8 +215,12 @@ class OpenAILLMService:
         최종 FinalPaper 객체로 변환한다.
 
         검증 내용:
-        - 존재하지 않는 citation 제거
+        - 존재하지 않는 source citation 제거
         - 본문 inline citation 검증
+        - 존재하지 않는 chunk/document evidence 제거
+        - claim_text가 실제 section 본문에 있는지 확인
+        - 동일 evidence 중복 제거
+        - RAG score를 provenance에 연결
         - 동일 제목 섹션 중복 제거
         - sections 안의 결론 제거
         - 빈 섹션 제거
@@ -210,17 +233,36 @@ class OpenAILLMService:
             for source in rag_result.sources
         }
 
+        context_lookup = {
+            (
+                str(context.chunk_id),
+                str(context.document_id),
+            ): context
+            for context in rag_result.contexts
+            if (
+                context.chunk_id is not None
+                and context.document_id is not None
+            )
+        }
+
         validated_sections: list[
             PaperSection
         ] = []
 
+        paper_citations: list[
+            PaperCitation
+        ] = []
+
         seen_headings: set[str] = set()
+
+        seen_evidence: set[
+            tuple[str, str, str, str]
+        ] = set()
 
         for section in generated.sections:
             heading = section.heading.strip()
             content = section.content.strip()
 
-            # 빈 섹션 제거
             if not heading or not content:
                 continue
 
@@ -230,25 +272,19 @@ class OpenAILLMService:
                 )
             )
 
-            # 결론은 FinalPaper.conclusion에서만 관리
             if normalized_heading in {
                 "결론",
                 "conclusion",
             }:
                 continue
 
-            # 동일한 제목의 섹션 중복 방지
-            if (
-                normalized_heading
-                in seen_headings
-            ):
+            if normalized_heading in seen_headings:
                 continue
 
             seen_headings.add(
                 normalized_heading
             )
 
-            # structured output의 citations 검증
             valid_citations: list[str] = []
 
             for citation in section.citations:
@@ -268,7 +304,6 @@ class OpenAILLMService:
                         citation_id
                     )
 
-            # 본문 안 citation도 별도로 검증
             sanitized_content = (
                 cls._sanitize_inline_citations(
                     content=content,
@@ -281,12 +316,111 @@ class OpenAILLMService:
             if not sanitized_content:
                 continue
 
+            normalized_content = (
+                cls._normalize_text(
+                    sanitized_content
+                )
+            )
+
+            section_evidence: list[
+                PaperCitation
+            ] = []
+
+            for evidence in section.evidence:
+                claim_text = (
+                    evidence.claim_text.strip()
+                )
+
+                chunk_id = (
+                    evidence.chunk_id.strip()
+                )
+
+                document_id = (
+                    evidence.document_id.strip()
+                )
+
+                if (
+                    not claim_text
+                    or not chunk_id
+                    or not document_id
+                ):
+                    continue
+
+                context = context_lookup.get(
+                    (
+                        chunk_id,
+                        document_id,
+                    )
+                )
+
+                # 실제 RAG에서 반환하지 않은
+                # chunk/document 조합이면 제거
+                if context is None:
+                    continue
+
+                # 해당 document가 SOURCES에도
+                # 존재해야 최종 근거로 인정
+                if document_id not in valid_source_ids:
+                    continue
+
+                normalized_claim = (
+                    cls._normalize_text(
+                        claim_text
+                    )
+                )
+
+                # LLM이 evidence에만 별도 문장을
+                # 만들어 넣는 것을 방지한다.
+                if (
+                    not normalized_claim
+                    or normalized_claim
+                    not in normalized_content
+                ):
+                    continue
+
+                evidence_key = (
+                    normalized_heading,
+                    chunk_id,
+                    document_id,
+                    normalized_claim,
+                )
+
+                if evidence_key in seen_evidence:
+                    continue
+
+                seen_evidence.add(
+                    evidence_key
+                )
+
+                section_evidence.append(
+                    PaperCitation(
+                        section=heading,
+                        chunk_id=chunk_id,
+                        document_id=document_id,
+                        claim_text=claim_text,
+                        relevance_score=(
+                            context.score
+                        ),
+                    )
+                )
+
+                # 정확한 evidence가 존재하면
+                # 화면용 document citation에도 포함
+                if document_id not in valid_citations:
+                    valid_citations.append(
+                        document_id
+                    )
+
             validated_sections.append(
                 PaperSection(
                     heading=heading,
                     content=sanitized_content,
                     citations=valid_citations,
                 )
+            )
+
+            paper_citations.extend(
+                section_evidence
             )
 
         if not validated_sections:
@@ -325,4 +459,5 @@ class OpenAILLMService:
             sections=validated_sections,
             conclusion=conclusion,
             references=rag_result.sources,
+            paper_citations=paper_citations,
         )

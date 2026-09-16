@@ -47,6 +47,13 @@ def test_search() -> None:
     assert len(data["contexts"]) > 0
     assert len(data["sources"]) > 0
 
+    first_context = data["contexts"][0]
+
+    assert first_context["chunk_id"] == "MOCK-CHUNK-001"
+    assert first_context["document_id"] == "SRC001"
+    assert first_context["content"]
+    assert first_context["score"] == 0.95
+
     assert data["sources"][0]["source_id"] == "SRC001"
 
 
@@ -55,7 +62,7 @@ def test_generate() -> None:
         "/api/v1/generate",
         json={
             "topic": "생성형 AI 음악의 음성복제와 저작권",
-            "length": 5000,
+            "length": 4500,
         },
     )
 
@@ -69,9 +76,32 @@ def test_generate() -> None:
     assert "sections" in data
     assert "conclusion" in data
     assert "references" in data
+    assert "paper_citations" in data
 
     assert len(data["sections"]) > 0
     assert len(data["references"]) > 0
+    assert len(data["paper_citations"]) > 0
+
+    citation = data["paper_citations"][0]
+
+    assert "section" in citation
+    assert "chunk_id" in citation
+    assert "document_id" in citation
+    assert "claim_text" in citation
+    assert "relevance_score" in citation
+
+    assert citation["chunk_id"].startswith(
+        "MOCK-CHUNK-"
+    )
+
+    assert citation["document_id"] in {
+        "SRC001",
+        "SRC002",
+    }
+
+    assert citation["claim_text"]
+
+    assert citation["relevance_score"] is not None
 
 
 def test_generate_default_length() -> None:
@@ -88,6 +118,9 @@ def test_generate_default_length() -> None:
 
     assert "paper_id" in data
     assert "sections" in data
+    assert "paper_citations" in data
+
+    assert len(data["paper_citations"]) > 0
 
 
 def test_generate_topic_too_short() -> None:
@@ -95,7 +128,7 @@ def test_generate_topic_too_short() -> None:
         "/api/v1/generate",
         json={
             "topic": "AI",
-            "length": 5000,
+            "length": 4500,
         },
     )
 
