@@ -6,7 +6,7 @@
 -- v3에서 반영한 피드백:
 --   1. documents: content/url/published_at/document_type 필드 확정 (raw_text → content로 이름 변경)
 --   2. chunks: content/chunk_index 필드 확정, section/embedding_model 등 비핵심 필드 제거(MVP 슬림화)
---   3. embedding VECTOR(1536)은 임시값 — embedding model 확정 후 dimension 재확정 필요 (TODO 표시)
+--   3. embedding VECTOR(1536) 확정 — OpenAI text-embedding-3-large(dimensions=1536 truncate), 다국어 검색용 (2026-09)
 --   4. paper_citations는 MVP 그대로 유지
 --   5. "근거 없는 문장 금지" = DB 제약(NOT NULL) + Backend 검증(파일 하단 예시 쿼리) 이중 구현
 --   6. Neo4j는 STRETCH 유지
@@ -75,19 +75,25 @@ CREATE INDEX idx_documents_title_trgm    ON documents USING GIN (title gin_trgm_
 -- ---------------------------------------------------------------------
 -- 3. chunks : RAG 검색 최소 단위 (Vector + Keyword 동시 지원)
 -- ---------------------------------------------------------------------
--- TODO(embedding dimension): 아래 1536은 OpenAI text-embedding-3-small 기준 임시값.
---   실제 사용할 embedding model이 확정되면(2번/3번과 합의) 이 VECTOR(N) 값을 재확정하고
---   테이블을 재생성(ALTER COLUMN 또는 DROP/CREATE) 해야 함. 예: multilingual-e5-base=768.
+-- embedding dimension 확정: 1536 (OpenAI text-embedding-3-large, dimensions 파라미터로 truncate해서 씀
+--   — 원래 차원은 3072지만 1536으로 잘라서 받음, rag/embedding/embed.py 참고).
+--   다국어(한국어+영어) 검색 성능 때문에 -3-small 대신 -3-large로 확정함(2026-09).
 CREATE TABLE chunks (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     document_id     UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
 
     chunk_index     INTEGER NOT NULL,                -- 문서 내 순서
     content         TEXT NOT NULL,
+    -- 한국어 형태소 분석(조사/어미 제거) 결과 — 검색 인덱싱 전용, 화면 표시는 content 그대로 사용.
+    -- rag/preprocessing/korean_tokenize.py(kiwipiepy)가 채움. 2026-09-16 추가:
+    -- to_tsvector('simple', content)만 쓰면 "저작권"으로 검색해도 본문의 "저작권을"과 매칭이
+    -- 안 되는 문제가 있어서(simple은 조사를 안 떼어냄), content_tokenized를 따로 두고
+    -- content_tsv가 이 컬럼 기준으로 생성되게 함 — 쿼리 쪽(keyword_search.py)도 동일하게 토큰화.
+    content_tokenized TEXT,
     token_count     INTEGER,
 
-    content_tsv     TSVECTOR GENERATED ALWAYS AS (to_tsvector('simple', content)) STORED,
-    embedding       VECTOR(1536),                     -- TODO: dimension 확정 필요 (위 주석 참고)
+    content_tsv     TSVECTOR GENERATED ALWAYS AS (to_tsvector('simple', coalesce(content_tokenized, content))) STORED,
+    embedding       VECTOR(1536),                     -- text-embedding-3-large, dimensions=1536 truncate (위 78번째 줄 주석 참고)
 
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
 
