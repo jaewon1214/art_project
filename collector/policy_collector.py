@@ -86,19 +86,51 @@ TARGET_PAGES: list[dict] = [
 COPYRIGHT_RSS_URL = "https://www.copyright.or.kr/open/public-data/rss/rss.do?mode=news"
 COPYRIGHT_LIST_URL = "https://www.copyright.or.kr/notify/press-release/list.do"
 COPYRIGHT_MAX_ITEMS = 30
+# 2026-09-16 버그 수정: 목록 페이지 1페이지엔 딱 10건만 있는데 COPYRIGHT_MAX_ITEMS=30으로
+# RSS를 가져오다 보니, 11~30번째 항목은 1페이지에 없어서 url 매칭이 실패(url=None)하던
+# 문제가 있었음("url 안 들어가있는 것도 있는데"로 실사용 중 발견). 목록 페이지도 페이지네이션
+# (pageIndex=1,2,3...)해서 최소 COPYRIGHT_MAX_ITEMS건은 커버하도록 고침 — 10건/페이지 기준.
+COPYRIGHT_LIST_PAGE_SIZE = 10
 
 
-def _fetch_copyright_notice_urls() -> dict[str, str]:
-    """목록 페이지에서 (제목 -> 상세페이지 URL) 매핑을 만듦."""
-    resp = requests.get(COPYRIGHT_LIST_URL, timeout=10, headers=_BROWSER_HEADERS)
-    resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "html.parser")
+def _fetch_copyright_notice_urls(min_items: int = COPYRIGHT_MAX_ITEMS) -> dict[str, str]:
+    """목록 페이지에서 (제목 -> 상세페이지 URL) 매핑을 만듦 — RSS가 주는 항목 수만큼
+    커버하려고 필요한 페이지 수만큼 pageIndex를 넘겨가며 조회."""
+    pages_needed = -(-min_items // COPYRIGHT_LIST_PAGE_SIZE)  # 올림 나눗셈
     title_to_url: dict[str, str] = {}
-    for a in soup.select("a[href*='view.do?brdctsno=']"):
-        title = a.get_text(strip=True)
-        href = a.get("href", "")
-        if title and href:
-            title_to_url.setdefault(title, urljoin(COPYRIGHT_LIST_URL, href))
+    for page_index in range(1, pages_needed + 1):
+        try:
+            # 주의: pageIndex 파라미터 하나만 달랑 보내면 이 게시판은 엉뚱한 페이지를 반환함
+            # (실측: "?pageIndex=2" 단독 요청 -> 실제로는 10페이지가 돌아옴). 빈 문자열이라도
+            # 아래 나머지 파라미터를 전부 같이 보내야 정확한 페이지가 나옴 — 실측으로 확인.
+            resp = requests.get(
+                COPYRIGHT_LIST_URL,
+                params={
+                    "pageIndex": page_index,
+                    "brdclasscodeList": "",
+                    "etc2": "",
+                    "etc1": "",
+                    "searchText": "",
+                    "searchkeyword": "",
+                    "brdclasscode": "",
+                    "nationcodeList": "",
+                    "searchTarget": "ALL",
+                    "nationcode": "",
+                },
+                timeout=10,
+                headers=_BROWSER_HEADERS,
+            )
+            resp.raise_for_status()
+        except Exception as e:  # noqa: BLE001 — 한 페이지 실패해도 나머지 페이지로 계속 진행
+            print(f"[policy_collector] 저작권위원회 목록 {page_index}페이지 조회 실패: {e}")
+            continue
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for a in soup.select("a[href*='view.do?brdctsno=']"):
+            title = a.get_text(strip=True)
+            href = a.get("href", "")
+            if title and href:
+                title_to_url.setdefault(title, urljoin(COPYRIGHT_LIST_URL, href))
     return title_to_url
 
 
