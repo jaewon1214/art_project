@@ -32,6 +32,12 @@ import requests  # pip install requests
 ARXIV_API = "http://export.arxiv.org/api/query"
 SEMANTIC_SCHOLAR_API = "https://api.semanticscholar.org/graph/v1/paper/search"
 
+# 2026-09-16: "최신 데이터 위주로 수집" 전략 — 오래된 논문이 검색 결과 상위를 차지해서
+# 최신 논문이 덜 잡히는 문제를 줄이기 위해 연도 필터를 추가. arXiv/Semantic Scholar 둘 다
+# 이 연도 '이후' 논문만 수집(과거 논문을 아예 안 모으는 게 아니라, 최신 쪽으로 비중을 옮기는 것).
+# 필요하면 팀 논의로 조정할 것.
+PAPER_YEAR_FROM = 2023
+
 # 주제(생성형 AI와 음악 창작)의 4개 하위쟁점별 검색 쿼리.
 # abs: = 초록(abstract) 안에서 검색. 필요하면 팀 논의로 쿼리 문구를 더 좁히거나 넓힐 것.
 # 카테고리당 쿼리 1개 -> 2개(기존 좁은 쿼리 + 더 넓은 변형)로 늘려서 수집 폭을 넓힘.
@@ -89,8 +95,11 @@ SEMANTIC_SCHOLAR_RETRY_BACKOFF_SEC = 5  # 429 맞으면 5, 10, 20초... 늘려�
 
 
 def _fetch_query(query: str) -> list:
+    # PAPER_YEAR_FROM 이후로 제출된 논문만 — arXiv 날짜 범위 문법은 YYYYMMDDHHMMSS 14자리.
+    date_filter = f"submittedDate:[{PAPER_YEAR_FROM}0101000000 TO 99991231235959]"
+    full_query = f"({query}) AND {date_filter}"
     url = (
-        f"{ARXIV_API}?search_query={quote(query)}"
+        f"{ARXIV_API}?search_query={quote(full_query)}"
         f"&start=0&max_results={MAX_RESULTS_PER_QUERY}"
         f"&sortBy=submittedDate&sortOrder=descending"
     )
@@ -111,6 +120,9 @@ def _fetch_semantic_scholar(query: str, offset: int = 0) -> list[dict]:
                     "offset": offset,
                     "limit": SEMANTIC_SCHOLAR_MAX_RESULTS,
                     "fields": "title,abstract,authors,year,publicationDate,externalIds,url",
+                    # "2023-" 형태 = PAPER_YEAR_FROM 연도부터 최신까지. 이 엔드포인트는 sort
+                    # 파라미터는 안 되지만(정렬은 /paper/search/bulk 전용) year 필터는 지원됨.
+                    "year": f"{PAPER_YEAR_FROM}-",
                 },
                 timeout=10,
                 headers={"User-Agent": "Mozilla/5.0"},
