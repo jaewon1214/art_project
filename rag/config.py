@@ -16,7 +16,7 @@ load_dotenv()
 
 # --- Embedding ------------------------------------------------------------
 EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "")  # 예: "openai" | "sentence-transformers"
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "")        # 예: "text-embedding-3-small"
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "")        # 예: "text-embedding-3-large" (다국어 검색 위해 채택)
 EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "1536"))   # database/init/01_schema.sql의 VECTOR(1536)과 반드시 일치
 EMBEDDING_API_KEY = os.getenv("EMBEDDING_API_KEY", "")
 

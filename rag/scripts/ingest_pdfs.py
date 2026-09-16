@@ -10,8 +10,8 @@
       음성복제/...
       AI작곡/...
 
-사용법 (rag/ 에서):
-    python -m scripts.ingest_pdfs
+사용법 (secondpj 루트에서 — rag/ 안에서 돌리면 "from rag..." 절대 임포트가 깨짐):
+    python -m rag.scripts.ingest_pdfs
 
 이미 넣은 PDF를 다시 돌려도 content_hash로 중복 걸러져서 안전(재실행 가능).
 LLM_PROVIDER가 설정돼 있으면 "꼭 관련된 내용으로만 수집" 요건대로 주제와 무관한 PDF는

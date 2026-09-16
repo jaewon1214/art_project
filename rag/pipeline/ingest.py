@@ -2,13 +2,19 @@
 "데이터가 들어올 때마다 자동으로 연결"의 실제 진입점.
 
 collectors/*.collect()가 만든 raw dict 1건을 ingest_document()에 넣으면:
-    normalize -> 중복(content_hash) 확인
+    normalize -> 중복(content_hash 완전일치 + title 근접중복) 확인
     -> (LLM_PROVIDER 설정돼 있으면) 관련성 판정 — 주제와 무관하면 여기서 저장하지 않고 중단
-    -> documents/chunks insert -> (EMBEDDING_PROVIDER 설정돼 있으면) chunk 임베딩 계산 후 저장
+       (관련성 있으면 같이 나온 category로 collector가 넘긴 category를 덮어씀 — 실제 내용 기준)
+    -> (관련성 있고, document_type != "paper" 이고, language != "ko" 인 문서만) 한국어로 번역
+       — 영어 논문(arXiv/Semantic Scholar)은 원문 학술 용어 보존을 위해 번역하지 않음
+    -> documents/chunks insert(번역됐으면 번역문 기준) -> (EMBEDDING_PROVIDER 설정돼 있으면) chunk 임베딩 계산 후 저장
     -> (관련성 판정 때 계산해둔 엔티티/관계를 그대로) entities/document_entities 저장
     -> (NEO4J_URI 설정돼 있으면) Neo4j 노드/관계 동기화
 까지 한 번에 처리됨. 관련성 판정과 엔티티 추출은 LLM 호출 1번으로 같이 끝내고 그 결과를 재사용 —
-문서 1건당 LLM 호출은 정확히 1번(구성 안 돼 있으면 0번)이다.
+문서 1건당 관련성판정 LLM 호출은 정확히 1번(구성 안 돼 있으면 0번), 번역 대상이면 추가로 LLM
+호출이 붙는다(문서 길이에 따라 여러 번 — preprocessing/translate.py의 CHUNK_SIZE_CHARS 단위 분할).
+content_hash는 번역 전 원문 기준으로 계산해서 저장하므로, 같은 원문 기사를 다시 수집해도
+번역 결과와 무관하게 정상적으로 중복 처리된다.
 
 LLM_PROVIDER/EMBEDDING_PROVIDER/NEO4J_URI가 .env에 없으면 그 단계만 조용히 건너뛰고
 documents/chunks 저장까지는 항상 정상 진행(어느 한 단계 실패/미구성이 수집 자체를 막지 않게).
@@ -21,8 +27,9 @@ from rag.embedding.embed import embed_texts, embedding_to_pgvector_literal
 from rag.entity_extraction import extractor
 from rag.entity_extraction.sync import store_extraction
 from database.neo4j.loader import load_entities, load_relations
-from rag.preprocessing.dedupe import content_hash, is_duplicate
+from rag.preprocessing.dedupe import content_hash, find_near_duplicate, is_duplicate
 from rag.preprocessing.normalize_metadata import normalize
+from rag.preprocessing.translate import translate_to_korean
 
 
 def get_or_create_source(conn, name: str, source_type: str) -> int:
@@ -45,9 +52,11 @@ def ingest_document(raw_doc: dict, sync_graph: bool = True) -> dict:
              published_at/language/source_name 키를 가진 dict.
 
     반환:
-      {"status": "inserted", "document_id": <uuid>}   — 정상 저장됨
-      {"status": "duplicate"}                          — 이미 수집된 문서(content_hash 중복)
-      {"status": "irrelevant", "reason": <str>}         — LLM이 주제와 무관하다고 판정, 저장 안 함
+      {"status": "inserted", "document_id": <uuid>}          — 정상 저장됨
+      {"status": "duplicate"}                                 — 이미 수집된 문서(content_hash 완전 일치)
+      {"status": "near_duplicate", "similar_to": <title>}      — 같은 document_type 안에서 제목이
+                                                                  기존 문서와 매우 유사(pg_trgm) — 저장 안 함
+      {"status": "irrelevant", "reason": <str>}                — LLM이 주제와 무관하다고 판정, 저장 안 함
     """
     doc = normalize(raw_doc)
     h = content_hash(doc["content"])
@@ -56,6 +65,12 @@ def ingest_document(raw_doc: dict, sync_graph: bool = True) -> dict:
         if is_duplicate(conn, h):
             return {"status": "duplicate"}
 
+        # 근접 중복(제목 유사도) — 완전 일치는 아니지만 같은 사건을 다른 매체가 비슷하게 보도한
+        # 경우 등을 잡음. LLM 호출(비용 발생) 전에 걸러서 불필요한 관련성판정 비용도 같이 아낌.
+        near_dup_title = find_near_duplicate(conn, doc["title"], doc["document_type"])
+        if near_dup_title:
+            return {"status": "near_duplicate", "similar_to": near_dup_title}
+
         # 관련성 판정 + 엔티티/관계 추출 — documents insert 전에 LLM 호출 1번.
         # "꼭 관련된 내용으로만 수집" 요건: is_relevant=False면 여기서 그냥 끝, DB에 아무것도 안 남음.
         extraction: dict | None = None
@@ -63,6 +78,19 @@ def ingest_document(raw_doc: dict, sync_graph: bool = True) -> dict:
             extraction = extractor.analyze_document(doc["content"])
             if not extraction["is_relevant"]:
                 return {"status": "irrelevant", "reason": extraction.get("relevance_reason", "")}
+            # collector가 넘긴 category(검색쿼리/사람이 미리 정한 값)는 1차 힌트일 뿐이고,
+            # 문서 실제 내용을 본 LLM 분류 결과가 있으면 그걸로 덮어씀 — news_collector.py가
+            # 모든 기사에 category="음성복제"를 하드코딩하던 버그를 여기서 근본적으로 해결.
+            if extraction.get("category"):
+                doc["category"] = extraction["category"]
+
+        # 번역 — "영어논문은 번역 필요없음, 나머지 데이터만 번역" 요구사항:
+        # document_type == "paper"면 원문(영어) 그대로 두고, 그 외에 language != "ko"인 문서만 번역.
+        # 관련성 판정을 이미 통과한 문서에 대해서만 호출하므로 버려질 문서에 번역 비용을 쓰지 않는다.
+        if config.LLM_PROVIDER and doc["document_type"] != "paper" and doc["language"] != "ko":
+            doc["title"] = translate_to_korean(doc["title"]) or doc["title"]
+            doc["content"] = translate_to_korean(doc["content"])
+            doc["language"] = "ko"
 
         source_id = get_or_create_source(conn, raw_doc["source_name"], doc["document_type"])
 
@@ -84,8 +112,8 @@ def ingest_document(raw_doc: dict, sync_graph: bool = True) -> dict:
             for row in chunk_rows:
                 cur.execute(
                     """
-                    INSERT INTO chunks (document_id, chunk_index, content, token_count)
-                    VALUES (%(document_id)s, %(chunk_index)s, %(content)s, %(token_count)s)
+                    INSERT INTO chunks (document_id, chunk_index, content, content_tokenized, token_count)
+                    VALUES (%(document_id)s, %(chunk_index)s, %(content)s, %(content_tokenized)s, %(token_count)s)
                     RETURNING id;
                     """,
                     row,
