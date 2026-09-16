@@ -1,10 +1,12 @@
 import pytest
 
 from backend.app.schemas.llm import (
+    GeneratedEvidence,
     GeneratedPaperContent,
     GeneratedSection,
 )
 from backend.app.schemas.rag import (
+    RagContext,
     RagResult,
     Source,
 )
@@ -16,8 +18,18 @@ from backend.app.services.openai_llm_service import (
 def make_rag_result() -> RagResult:
     return RagResult(
         contexts=[
-            "생성형 AI 음악 관련 근거 1",
-            "음성복제 관련 근거 2",
+            RagContext(
+                chunk_id="chunk-1",
+                document_id="doc-1",
+                content="생성형 AI 음악 관련 근거 1",
+                score=0.95,
+            ),
+            RagContext(
+                chunk_id="chunk-2",
+                document_id="doc-2",
+                content="음성복제 관련 근거 2",
+                score=0.91,
+            ),
         ],
         sources=[
             Source(
@@ -54,26 +66,16 @@ def test_invalid_citation_is_removed():
         conclusion="결론입니다.",
     )
 
-    result = (
-        OpenAILLMService
-        ._build_final_paper(
-            generated=generated,
-            rag_result=make_rag_result(),
-        )
+    result = OpenAILLMService._build_final_paper(
+        generated=generated,
+        rag_result=make_rag_result(),
     )
 
     section = result.sections[0]
 
-    assert section.citations == [
-        "doc-1"
-    ]
-
+    assert section.citations == ["doc-1"]
     assert "[doc-1]" in section.content
-
-    assert (
-        "[fake-source]"
-        not in section.content
-    )
+    assert "[fake-source]" not in section.content
 
 
 def test_duplicate_citations_are_removed():
@@ -83,10 +85,7 @@ def test_duplicate_citations_are_removed():
         sections=[
             GeneratedSection(
                 heading="음성복제",
-                content=(
-                    "음성복제 관련 내용입니다. "
-                    "[doc-2]"
-                ),
+                content="음성복제 관련 내용입니다. [doc-2]",
                 citations=[
                     "doc-2",
                     "[doc-2]",
@@ -97,12 +96,9 @@ def test_duplicate_citations_are_removed():
         conclusion="결론입니다.",
     )
 
-    result = (
-        OpenAILLMService
-        ._build_final_paper(
-            generated=generated,
-            rag_result=make_rag_result(),
-        )
+    result = OpenAILLMService._build_final_paper(
+        generated=generated,
+        rag_result=make_rag_result(),
     )
 
     assert (
@@ -135,25 +131,14 @@ def test_duplicate_and_conclusion_sections_are_removed():
         conclusion="최종 결론입니다.",
     )
 
-    result = (
-        OpenAILLMService
-        ._build_final_paper(
-            generated=generated,
-            rag_result=make_rag_result(),
-        )
+    result = OpenAILLMService._build_final_paper(
+        generated=generated,
+        rag_result=make_rag_result(),
     )
 
     assert len(result.sections) == 1
-
-    assert (
-        result.sections[0].heading
-        == "저작권"
-    )
-
-    assert (
-        result.conclusion
-        == "최종 결론입니다."
-    )
+    assert result.sections[0].heading == "저작권"
+    assert result.conclusion == "최종 결론입니다."
 
 
 def test_no_valid_sections_raises_error():
@@ -174,12 +159,9 @@ def test_no_valid_sections_raises_error():
         ValueError,
         match="유효한 본문 섹션",
     ):
-        (
-            OpenAILLMService
-            ._build_final_paper(
-                generated=generated,
-                rag_result=make_rag_result(),
-            )
+        OpenAILLMService._build_final_paper(
+            generated=generated,
+            rag_result=make_rag_result(),
         )
 
 
@@ -190,30 +172,21 @@ def test_references_are_removed_from_conclusion():
         sections=[
             GeneratedSection(
                 heading="저작권",
-                content=(
-                    "본문 내용입니다. "
-                    "[doc-1]"
-                ),
-                citations=[
-                    "doc-1"
-                ],
+                content="본문 내용입니다. [doc-1]",
+                citations=["doc-1"],
             ),
         ],
         conclusion=(
-            "생성형 AI 음악에 대한 결론입니다."
-            "\n\n"
+            "생성형 AI 음악에 대한 결론입니다.\n\n"
             "참고문헌\n"
             "- Fake Author. Fake Paper.\n"
             "- https://fake.example.com"
         ),
     )
 
-    result = (
-        OpenAILLMService
-        ._build_final_paper(
-            generated=generated,
-            rag_result=make_rag_result(),
-        )
+    result = OpenAILLMService._build_final_paper(
+        generated=generated,
+        rag_result=make_rag_result(),
     )
 
     assert (
@@ -221,14 +194,111 @@ def test_references_are_removed_from_conclusion():
         == "생성형 AI 음악에 대한 결론입니다."
     )
 
-    assert (
-        "참고문헌"
-        not in result.conclusion
-    )
-
-    assert (
-        "Fake Author"
-        not in result.conclusion
-    )
+    assert "참고문헌" not in result.conclusion
+    assert "Fake Author" not in result.conclusion
 
     assert len(result.references) == 2
+
+
+def test_valid_evidence_creates_paper_citation():
+    claim = "AI 음악의 저작권 문제가 논의되고 있습니다."
+
+    generated = GeneratedPaperContent(
+        title="생성형 AI와 음악 창작",
+        abstract="초록입니다.",
+        sections=[
+            GeneratedSection(
+                heading="저작권",
+                content=f"{claim} [doc-1]",
+                citations=["doc-1"],
+                evidence=[
+                    GeneratedEvidence(
+                        claim_text=claim,
+                        chunk_id="chunk-1",
+                        document_id="doc-1",
+                    )
+                ],
+            ),
+        ],
+        conclusion="결론입니다.",
+    )
+
+    result = OpenAILLMService._build_final_paper(
+        generated=generated,
+        rag_result=make_rag_result(),
+    )
+
+    assert len(result.paper_citations) == 1
+
+    citation = result.paper_citations[0]
+
+    assert citation.section == "저작권"
+    assert citation.chunk_id == "chunk-1"
+    assert citation.document_id == "doc-1"
+    assert citation.claim_text == claim
+    assert citation.relevance_score == pytest.approx(
+        0.95
+    )
+
+
+def test_invalid_chunk_document_pair_is_removed():
+    claim = "AI 음악의 저작권 문제가 논의되고 있습니다."
+
+    generated = GeneratedPaperContent(
+        title="생성형 AI와 음악 창작",
+        abstract="초록입니다.",
+        sections=[
+            GeneratedSection(
+                heading="저작권",
+                content=f"{claim} [doc-1]",
+                citations=["doc-1"],
+                evidence=[
+                    GeneratedEvidence(
+                        claim_text=claim,
+                        chunk_id="chunk-1",
+                        document_id="doc-2",
+                    )
+                ],
+            ),
+        ],
+        conclusion="결론입니다.",
+    )
+
+    result = OpenAILLMService._build_final_paper(
+        generated=generated,
+        rag_result=make_rag_result(),
+    )
+
+    assert result.paper_citations == []
+
+
+def test_evidence_claim_must_exist_in_section_content():
+    generated = GeneratedPaperContent(
+        title="생성형 AI와 음악 창작",
+        abstract="초록입니다.",
+        sections=[
+            GeneratedSection(
+                heading="저작권",
+                content="실제 본문 문장입니다. [doc-1]",
+                citations=["doc-1"],
+                evidence=[
+                    GeneratedEvidence(
+                        claim_text=(
+                            "본문에 존재하지 않는 "
+                            "별도의 주장입니다."
+                        ),
+                        chunk_id="chunk-1",
+                        document_id="doc-1",
+                    )
+                ],
+            ),
+        ],
+        conclusion="결론입니다.",
+    )
+
+    result = OpenAILLMService._build_final_paper(
+        generated=generated,
+        rag_result=make_rag_result(),
+    )
+
+    assert result.paper_citations == []
