@@ -22,6 +22,7 @@ egress allowlist에 없으면 막힐 수 있음. 일반 PC/서버 환경에서�
 """
 from __future__ import annotations
 
+import re
 import time
 from datetime import date, datetime
 from urllib.parse import quote
@@ -37,6 +38,19 @@ SEMANTIC_SCHOLAR_API = "https://api.semanticscholar.org/graph/v1/paper/search"
 # 이 연도 '이후' 논문만 수집(과거 논문을 아예 안 모으는 게 아니라, 최신 쪽으로 비중을 옮기는 것).
 # 필요하면 팀 논의로 조정할 것.
 PAPER_YEAR_FROM = 2023
+
+# 2026-09-16: arXiv RSS 피드 추가 — 검색 API(쿼리+연도필터)는 "그 시점까지 쌓인 것 중 검색"이라
+# 매번 똑같은 과거 논문이 잡힐 수 있는데, RSS는 그 카테고리에 "그날 새로 올라온" 논문만 나옴.
+# 검색어 필터가 없어서 카테고리 전체가 다 오니까(대부분 무관한 오디오처리 논문), LLM 관련성판정
+# 호출 비용을 아끼려고 최소한의 키워드로 1차 거름.
+ARXIV_RSS_BASE = "https://rss.arxiv.org/rss"
+ARXIV_RSS_CATEGORIES = ["cs.SD", "eess.AS"]
+_RSS_KEYWORD_RE = re.compile(
+    r"music|song|singing|singer|compos|melody|lyric|"
+    r"voice clon|voice conversion|speaker anonymiz|synthetic voice|"
+    r"copyright|generative music",
+    re.IGNORECASE,
+)
 
 # 주제(생성형 AI와 음악 창작)의 4개 하위쟁점별 검색 쿼리.
 # abs: = 초록(abstract) 안에서 검색. 필요하면 팀 논의로 쿼리 문구를 더 좁히거나 넓힐 것.
@@ -103,6 +117,13 @@ def _fetch_query(query: str) -> list:
         f"&start=0&max_results={MAX_RESULTS_PER_QUERY}"
         f"&sortBy=submittedDate&sortOrder=descending"
     )
+    parsed = feedparser.parse(url)
+    return parsed.entries
+
+
+def _fetch_arxiv_rss(feed_category: str) -> list:
+    """카테고리 전체의 "오늘/최근 새로 제출된" 논문 목록 — 검색어 없이 그대로 옴."""
+    url = f"{ARXIV_RSS_BASE}/{feed_category}"
     parsed = feedparser.parse(url)
     return parsed.entries
 
@@ -206,6 +227,59 @@ def collect() -> list[dict]:
                 )
 
             time.sleep(REQUEST_INTERVAL_SEC)
+
+    # ---------------- arXiv RSS (검색어 없이, 카테고리 전체 최신 논문) ----------------
+    for feed_category in ARXIV_RSS_CATEGORIES:
+        try:
+            entries = _fetch_arxiv_rss(feed_category)
+        except Exception as e:  # noqa: BLE001
+            print(f"[paper_collector] arXiv RSS '{feed_category}' 조회 실패: {e}")
+            continue
+
+        for entry in entries:
+            link = entry.get("link", "")
+            if not link:
+                continue
+            short_id = _arxiv_short_id(link)
+            if short_id in seen_arxiv_ids:
+                continue
+
+            title = entry.get("title", "").replace("\n", " ").strip()
+            abstract = entry.get("summary", "").replace("\n", " ").strip()
+            # description이 "arXiv:2609.12432v1 Announce Type: new  Abstract: ..." 형태라
+            # 실제 초록만 남김(패턴이 안 맞으면 원문 그대로 둠 — 손실보다 원문 보존이 낫다).
+            if "Abstract:" in abstract:
+                abstract = abstract.split("Abstract:", 1)[-1].strip()
+
+            if not _RSS_KEYWORD_RE.search(f"{title} {abstract}"):
+                continue  # 주제 키워드조차 없으면 LLM 호출(비용) 없이 바로 스킵
+
+            seen_arxiv_ids.add(short_id)
+
+            published_at = date.today()
+            if entry.get("published_parsed"):
+                try:
+                    published_at = date(*entry.published_parsed[:3])
+                except (TypeError, ValueError):
+                    pass
+
+            authors = entry.get("author") or None
+
+            results.append(
+                {
+                    "title": title,
+                    "content": abstract,
+                    "url": link,
+                    "author": authors,
+                    "category": "AI작곡",  # 1차 힌트 — LLM 관련성판정이 실제 내용 기준으로 덮어씀
+                    "document_type": "paper",
+                    "published_at": published_at,
+                    "language": "en",
+                    "source_name": "arXiv",
+                }
+            )
+
+        time.sleep(REQUEST_INTERVAL_SEC)
 
     # ---------------- Semantic Scholar ----------------
     for category, queries in SEMANTIC_SCHOLAR_QUERIES.items():

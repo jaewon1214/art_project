@@ -7,7 +7,9 @@ news_collector.py와 같은 규약: collect() -> list[dict] (documents 컬럼과
 from __future__ import annotations
 
 from datetime import date
+from urllib.parse import urljoin
 
+import feedparser
 import requests
 from bs4 import BeautifulSoup
 
@@ -75,6 +77,79 @@ TARGET_PAGES: list[dict] = [
 ]
 
 
+# 2026-09-16: 한국저작권위원회 보도자료 RSS 추가 — 위 TARGET_PAGES는 브랜치 URL 1건이라
+# 새 보도자료가 나와도 자동으로 안 잡혔음(수동으로 URL을 새로 추가해야 함). RSS는 실행할 때마다
+# 최근 보도자료가 자동으로 갱신됨.
+# 주의: 이 RSS(mode=news)는 title/description/pubDate만 주고 <link>/<guid>가 없어서
+# 근거 URL을 얻으려면 목록 페이지(list.do)를 같이 봐서 제목으로 매칭해야 함 — 매칭 실패하면
+# url=None으로 저장(문서 자체는 살리고, 출처 링크만 비게 됨).
+COPYRIGHT_RSS_URL = "https://www.copyright.or.kr/open/public-data/rss/rss.do?mode=news"
+COPYRIGHT_LIST_URL = "https://www.copyright.or.kr/notify/press-release/list.do"
+COPYRIGHT_MAX_ITEMS = 30
+
+
+def _fetch_copyright_notice_urls() -> dict[str, str]:
+    """목록 페이지에서 (제목 -> 상세페이지 URL) 매핑을 만듦."""
+    resp = requests.get(COPYRIGHT_LIST_URL, timeout=10, headers=_BROWSER_HEADERS)
+    resp.raise_for_status()
+    soup = BeautifulSoup(resp.text, "html.parser")
+    title_to_url: dict[str, str] = {}
+    for a in soup.select("a[href*='view.do?brdctsno=']"):
+        title = a.get_text(strip=True)
+        href = a.get("href", "")
+        if title and href:
+            title_to_url.setdefault(title, urljoin(COPYRIGHT_LIST_URL, href))
+    return title_to_url
+
+
+def _fetch_copyright_notices() -> list[dict]:
+    """한국저작권위원회 보도자료 RSS. TARGET_PAGES와 달리 매번 최근 글이 자동으로 잡힘 —
+    AI/음악과 무관한 보도자료(예: 독서행사)도 섞여 나오는데, 이건 여기서 안 거르고
+    category="저작권" 힌트만 붙여서 pipeline/ingest.py의 LLM 관련성판정에 맡김."""
+    parsed = feedparser.parse(COPYRIGHT_RSS_URL)
+    if not parsed.entries:
+        return []
+
+    title_to_url: dict[str, str] = {}
+    try:
+        title_to_url = _fetch_copyright_notice_urls()
+    except Exception as e:  # noqa: BLE001 — 목록 페이지 실패해도 RSS 본문 자체는 살림(url만 없이)
+        print(f"[policy_collector] 저작권위원회 목록 페이지 조회 실패(url 매칭 없이 진행): {e}")
+
+    docs: list[dict] = []
+    for entry in parsed.entries[:COPYRIGHT_MAX_ITEMS]:
+        title = (entry.get("title") or "").strip()
+        if not title:
+            continue
+
+        raw_html = entry.get("summary") or entry.get("description") or ""
+        content = normalize_whitespace(BeautifulSoup(raw_html, "html.parser").get_text(separator="\n"))
+        if is_too_short(content):
+            continue
+
+        published_at = date.today()
+        if entry.get("published_parsed"):
+            try:
+                published_at = date(*entry.published_parsed[:3])
+            except (TypeError, ValueError):
+                pass
+
+        docs.append(
+            {
+                "title": title,
+                "content": content,
+                "url": title_to_url.get(title),  # 매칭 실패시 None (url 컬럼은 NULL 허용)
+                "author": entry.get("author"),
+                "category": "저작권",  # 1차 힌트 — LLM 관련성판정이 실제 내용 기준으로 덮거나 무관하면 스킵
+                "document_type": "policy",
+                "published_at": published_at,
+                "language": "ko",
+                "source_name": "한국저작권위원회",
+            }
+        )
+    return docs
+
+
 def _fetch_page(url: str) -> tuple[str, str]:
     """(title, content) 반환. 사이트마다 selector가 달라서 TODO로 남겨둠."""
     resp = requests.get(url, timeout=10, headers=_BROWSER_HEADERS)
@@ -113,6 +188,12 @@ def collect() -> list[dict]:
                 "source_name": page["source_name"],
             }
         )
+
+    try:
+        results.extend(_fetch_copyright_notices())
+    except Exception as e:  # noqa: BLE001
+        print(f"[policy_collector] 저작권위원회 RSS 수집 실패: {e}")
+
     return results
 
 
