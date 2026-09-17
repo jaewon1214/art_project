@@ -34,6 +34,19 @@ egress allowlist에 없으면 막힐 수 있음. 일반 PC/서버 환경에서�
   논문은 content가 없어서 스킵.
 - DOI가 "10.48550/arXiv.XXXX" 형태면 arXiv 프리프린트를 OpenAlex가 다시 색인한 것 —
   seen_arxiv_ids로 걸러서 중복 저장 방지(Semantic Scholar와 동일한 패턴).
+
+[OpenAlex 한국 논문] (2026-09-17 추가)
+- KCI Open API는 인증키 발급이 수동 심사라 오늘 바로 못 씀(신청은 해둔 상태, 승인 대기 중).
+  그 사이 공백을 메우려고, 이미 연결돼 있던 OpenAlex에 filter=language:ko를 추가해서
+  "한국어로 작성된" 논문만 별도로 검색하는 패스를 만듦 — 키/승인 필요 없이 오늘 바로 동작.
+  단, OpenAlex는 Crossref/DOI 기반 색인이라 DOI 없는 국내 학회지(특히 KCI 전용 등재지)는
+  안 잡힐 수 있음 — 커버리지가 KCI보다 좁을 걸로 예상되지만, 승인 기다리는 동안의 임시
+  보완재로는 충분함. KCI 승인되면 그쪽이 주력, 이건 계속 병행(중복은 겹치는 DOI가 거의
+  없어서 사실상 안 남).
+- 쿼리는 SEMANTIC_SCHOLAR_QUERIES와 같은 카테고리/의미를 한국어 키워드로 옮긴 것.
+- 이 패스로 수집된 문서는 language="ko"로 태그 — ingest.py가 document_type=="paper"인
+  문서는 애초에 번역을 안 시키므로(원문 그대로 저장) 동작에 영향 없고, 메타데이터만
+  정확해짐(나중에 language 기준으로 필터링/집계할 때 필요).
 """
 from __future__ import annotations
 
@@ -116,6 +129,28 @@ SEMANTIC_SCHOLAR_QUERIES: dict[str, list[str]] = {
     "AI작곡": [
         "text-to-music generation transformer",
         "music generation diffusion language model",
+    ],
+}
+
+# 2026-09-17 추가: OpenAlex 한국어 논문(language=ko) 전용 패스에 쓰는 쿼리 — 위
+# SEMANTIC_SCHOLAR_QUERIES와 같은 카테고리/의도를 한국어 키워드로 옮긴 것. 모듈 docstring
+# [OpenAlex 한국 논문] 항목 참고.
+OPENALEX_KOREAN_QUERIES: dict[str, list[str]] = {
+    "저작권": [
+        "생성형 AI 음악 저작권",
+        "AI 음악 학습데이터 저작권 라이선스",
+    ],
+    "창작자성": [
+        "AI 음악 창작 저작자성",
+        "인간과 AI 공동창작 음악",
+    ],
+    "음성복제": [
+        "AI 보이스 클로닝 음성권",
+        "목소리 무단 학습 음성복제",
+    ],
+    "AI작곡": [
+        "텍스트 기반 AI 작곡",
+        "생성형 AI 작곡 서비스",
     ],
 }
 
@@ -203,10 +238,16 @@ def _fetch_semantic_scholar_paginated(query: str) -> list[dict]:
     return all_papers
 
 
-def _fetch_openalex(query: str, page: int) -> list[dict]:
+def _fetch_openalex(query: str, page: int, language: str | None = None) -> list[dict]:
+    """language를 주면(예: "ko") OpenAlex의 language 필터를 같이 걸어서 그 언어로 작성된
+    논문만 받음 — 2026-09-17 KCI 승인 대기 중 임시 대체용으로 추가 (모듈 docstring
+    [OpenAlex 한국 논문] 참고). 필터는 콤마로 이어붙이면 AND 조건이 됨."""
+    filters = [f"from_publication_date:{PAPER_YEAR_FROM}-01-01"]
+    if language:
+        filters.append(f"language:{language}")
     params = {
         "search": query,
-        "filter": f"from_publication_date:{PAPER_YEAR_FROM}-01-01",
+        "filter": ",".join(filters),
         "sort": "publication_date:desc",
         "per-page": OPENALEX_MAX_RESULTS,
         "page": page,
@@ -218,11 +259,11 @@ def _fetch_openalex(query: str, page: int) -> list[dict]:
     return resp.json().get("results", [])
 
 
-def _fetch_openalex_paginated(query: str) -> list[dict]:
+def _fetch_openalex_paginated(query: str, language: str | None = None) -> list[dict]:
     """OPENALEX_MAX_PAGES까지 page 파라미터로 페이지네이션 — Semantic Scholar와 동일한 패턴."""
     all_works: list[dict] = []
     for page in range(1, OPENALEX_MAX_PAGES + 1):
-        works = _fetch_openalex(query, page)
+        works = _fetch_openalex(query, page, language=language)
         all_works.extend(works)
         if len(works) < OPENALEX_MAX_RESULTS:
             break
@@ -262,6 +303,51 @@ def _openalex_arxiv_id(doi: str | None) -> str | None:
         return None
     m = _OPENALEX_ARXIV_DOI_RE.search(doi)
     return m.group(1) if m else None
+
+
+def _openalex_work_to_row(work: dict, category: str, seen_arxiv_ids: set[str], language: str) -> dict | None:
+    """OpenAlex work 1건 -> collect() 결과 row. 초록 없음/arXiv 중복이면 None.
+    영어 패스와 한국어 패스(language=ko) 둘 다 이 함수를 공유 — 2026-09-17 한국어 패스 추가
+    하면서 중복 로직을 안 늘리려고 뽑아냄."""
+    abstract = _reconstruct_abstract(work.get("abstract_inverted_index"))
+    if not abstract:
+        return None  # 초록 비공개 항목은 스킵 (content 필수)
+
+    arxiv_id = _openalex_arxiv_id(work.get("doi"))
+    if arxiv_id and arxiv_id in seen_arxiv_ids:
+        return None  # arXiv에서 이미 수집한 프리프린트와 중복
+
+    published_at = date.today()
+    pub_date = work.get("publication_date")
+    if pub_date:
+        try:
+            published_at = datetime.strptime(pub_date, "%Y-%m-%d").date()
+        except ValueError:
+            pass
+    elif work.get("publication_year"):
+        published_at = date(int(work["publication_year"]), 1, 1)
+
+    authors = (
+        ", ".join(
+            (a.get("author") or {}).get("display_name", "")
+            for a in work.get("authorships", [])
+        ).strip(", ")
+        or None
+    )
+
+    url = work.get("doi") or work.get("id") or ""
+
+    return {
+        "title": (work.get("title") or work.get("display_name") or "").strip(),
+        "content": abstract,
+        "url": url,
+        "author": authors,
+        "category": category,
+        "document_type": "paper",
+        "published_at": published_at,
+        "language": language,
+        "source_name": "OpenAlex",
+    }
 
 
 def collect() -> list[dict]:
@@ -408,7 +494,7 @@ def collect() -> list[dict]:
 
             time.sleep(SEMANTIC_SCHOLAR_INTERVAL_SEC)
 
-    # ---------------- OpenAlex ----------------
+    # ---------------- OpenAlex (영어/기본) ----------------
     # 쿼리 세트는 Semantic Scholar와 동일하게 재사용 — 둘 다 필드검색 문법(arXiv의 abs: 같은)
     # 없이 일반 키워드로 검색하는 API라 같은 쿼리 문구를 그대로 쓸 수 있음.
     for category, queries in SEMANTIC_SCHOLAR_QUERIES.items():
@@ -420,47 +506,28 @@ def collect() -> list[dict]:
                 continue
 
             for work in works:
-                abstract = _reconstruct_abstract(work.get("abstract_inverted_index"))
-                if not abstract:
-                    continue  # 초록 비공개 항목은 스킵 (content 필수)
+                row = _openalex_work_to_row(work, category, seen_arxiv_ids, language="en")
+                if row:
+                    results.append(row)
 
-                arxiv_id = _openalex_arxiv_id(work.get("doi"))
-                if arxiv_id and arxiv_id in seen_arxiv_ids:
-                    continue  # arXiv에서 이미 수집한 프리프린트와 중복
+            time.sleep(OPENALEX_INTERVAL_SEC)
 
-                published_at = date.today()
-                pub_date = work.get("publication_date")
-                if pub_date:
-                    try:
-                        published_at = datetime.strptime(pub_date, "%Y-%m-%d").date()
-                    except ValueError:
-                        pass
-                elif work.get("publication_year"):
-                    published_at = date(int(work["publication_year"]), 1, 1)
+    # ---------------- OpenAlex (한국어 논문, language=ko) ----------------
+    # 2026-09-17 추가: KCI Open API 인증키 승인 대기 중 — 그동안 국내 논문 공백을 메우는 임시
+    # 대체 경로. 모듈 docstring [OpenAlex 한국 논문] 참고. KCI 승인되면 그쪽이 주력이 되고
+    # 이 패스는 계속 병행(겹치는 DOI가 거의 없어 중복 걱정 없음).
+    for category, queries in OPENALEX_KOREAN_QUERIES.items():
+        for query in queries:
+            try:
+                works = _fetch_openalex_paginated(query, language="ko")
+            except Exception as e:  # noqa: BLE001
+                print(f"[paper_collector] OpenAlex(한국어) '{category}' 쿼리 실패: {e}")
+                continue
 
-                authors = (
-                    ", ".join(
-                        (a.get("author") or {}).get("display_name", "")
-                        for a in work.get("authorships", [])
-                    ).strip(", ")
-                    or None
-                )
-
-                url = work.get("doi") or work.get("id") or ""
-
-                results.append(
-                    {
-                        "title": (work.get("title") or work.get("display_name") or "").strip(),
-                        "content": abstract,
-                        "url": url,
-                        "author": authors,
-                        "category": category,
-                        "document_type": "paper",
-                        "published_at": published_at,
-                        "language": "en",
-                        "source_name": "OpenAlex",
-                    }
-                )
+            for work in works:
+                row = _openalex_work_to_row(work, category, seen_arxiv_ids, language="ko")
+                if row:
+                    results.append(row)
 
             time.sleep(OPENALEX_INTERVAL_SEC)
 
@@ -471,4 +538,4 @@ if __name__ == "__main__":
     docs = collect()
     print(f"{len(docs)}건 수집")
     for d in docs[:10]:
-        print(f"- [{d['source_name']}/{d['category']}] {d['title']} ({d['url']})")
+        print(f"- [{d['source_name']}/{d['category']}/{d['language']}] {d['title']} ({d['url']})")
