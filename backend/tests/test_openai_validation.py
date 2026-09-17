@@ -302,3 +302,59 @@ def test_evidence_claim_must_exist_in_section_content():
     )
 
     assert result.paper_citations == []
+def test_final_paper_over_4500_chars_is_rejected():
+    generated = GeneratedPaperContent(
+        title="생성형 AI와 음악 창작",
+        abstract="초록입니다.",
+        sections=[
+            GeneratedSection(
+                heading="본론",
+                content="가" * 4500,
+                citations=[],
+            ),
+        ],
+        conclusion="결론입니다.",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="최종 논문 분량이 제한을 초과했습니다",
+    ):
+        OpenAILLMService._build_final_paper(
+            generated=generated,
+            rag_result=make_rag_result(),
+            max_chars=4500,
+        )
+
+
+def test_final_paper_under_length_limit_is_allowed():
+    generated = GeneratedPaperContent(
+        title="생성형 AI와 음악 창작",
+        abstract="연구 초록입니다.",
+        sections=[
+            GeneratedSection(
+                heading="서론",
+                content="연구 배경입니다.",
+                citations=[],
+            ),
+            GeneratedSection(
+                heading="본론",
+                content="주요 논의입니다.",
+                citations=[],
+            ),
+        ],
+        conclusion="연구 결론입니다.",
+    )
+
+    result = OpenAILLMService._build_final_paper(
+        generated=generated,
+        rag_result=make_rag_result(),
+        max_chars=4500,
+    )
+
+    assert (
+        OpenAILLMService._count_final_paper_chars(
+            result
+        )
+        <= 4500
+    )

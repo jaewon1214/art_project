@@ -16,6 +16,8 @@ from backend.app.schemas.transformer import TransformerDraft
 
 
 class OpenAILLMService:
+    MAX_FINAL_PAPER_CHARS = 4500
+
     def __init__(self) -> None:
         settings = get_settings()
 
@@ -59,9 +61,16 @@ class OpenAILLMService:
         draft: TransformerDraft,
         length: int,
     ) -> FinalPaper:
+        # 프로젝트 전체 최대 분량은 4500자.
+        # 사용자가 더 작은 값을 요청한 경우에는 그 값을 우선한다.
+        effective_length = min(
+            length,
+            self.MAX_FINAL_PAPER_CHARS,
+        )
+
         prompt_value = await self.prompt_chain.build_prompt(
             topic=topic,
-            length=length,
+            length=effective_length,
             rag_result=rag_result,
             draft=draft,
         )
@@ -82,6 +91,7 @@ class OpenAILLMService:
         return self._build_final_paper(
             generated=generated,
             rag_result=rag_result,
+            max_chars=effective_length,
         )
 
     @staticmethod
@@ -127,6 +137,74 @@ class OpenAILLMService:
             " ",
             text,
         ).strip()
+
+    @classmethod
+    def _count_final_paper_chars(
+        cls,
+        paper: FinalPaper,
+    ) -> int:
+        """
+        최종 논문의 실제 표시 영역 글자 수를 계산한다.
+
+        포함:
+        - title
+        - abstract
+        - section heading
+        - section content
+        - conclusion
+
+        제외:
+        - references
+        - paper_citations
+        - paper_id
+        """
+
+        parts: list[str] = [
+            paper.title,
+            paper.abstract,
+        ]
+
+        for section in paper.sections:
+            parts.append(section.heading)
+            parts.append(section.content)
+
+        parts.append(paper.conclusion)
+
+        return sum(
+            len(part)
+            for part in parts
+        )
+
+    @classmethod
+    def _validate_final_length(
+        cls,
+        paper: FinalPaper,
+        max_chars: int,
+    ) -> None:
+        """
+        LLM이 Prompt의 분량 지시를 어겼더라도
+        Backend에서 최종적으로 초과 결과를 차단한다.
+        """
+
+        if max_chars <= 0:
+            raise ValueError(
+                "최종 논문 최대 글자 수는 "
+                "1 이상이어야 합니다."
+            )
+
+        actual_chars = (
+            cls._count_final_paper_chars(
+                paper
+            )
+        )
+
+        if actual_chars > max_chars:
+            raise ValueError(
+                "최종 논문 분량이 제한을 "
+                f"초과했습니다: "
+                f"{actual_chars}자 / "
+                f"최대 {max_chars}자"
+            )
 
     @classmethod
     def _sanitize_inline_citations(
@@ -209,6 +287,7 @@ class OpenAILLMService:
         cls,
         generated: GeneratedPaperContent,
         rag_result: RagResult,
+        max_chars: int | None = None,
     ) -> FinalPaper:
         """
         OpenAI Structured Output을 검증하여
@@ -226,6 +305,7 @@ class OpenAILLMService:
         - 빈 섹션 제거
         - 제목/초록/결론 비어 있음 검증
         - conclusion에 생성된 참고문헌 제거
+        - 최종 논문 4500자 제한 검증
         """
 
         valid_source_ids = {
@@ -272,12 +352,14 @@ class OpenAILLMService:
                 )
             )
 
+            # 결론은 FinalPaper.conclusion에서만 관리
             if normalized_heading in {
                 "결론",
                 "conclusion",
             }:
                 continue
 
+            # 같은 제목의 섹션 중복 방지
             if normalized_heading in seen_headings:
                 continue
 
@@ -287,6 +369,7 @@ class OpenAILLMService:
 
             valid_citations: list[str] = []
 
+            # structured output citation 검증
             for citation in section.citations:
                 citation_id = (
                     cls._normalize_citation_id(
@@ -304,6 +387,7 @@ class OpenAILLMService:
                         citation_id
                     )
 
+            # 본문 속 [source_id]도 검증
             sanitized_content = (
                 cls._sanitize_inline_citations(
                     content=content,
@@ -353,13 +437,13 @@ class OpenAILLMService:
                     )
                 )
 
-                # 실제 RAG에서 반환하지 않은
-                # chunk/document 조합이면 제거
+                # 실제 RAG에 없는
+                # chunk/document 조합은 제거
                 if context is None:
                     continue
 
-                # 해당 document가 SOURCES에도
-                # 존재해야 최종 근거로 인정
+                # document가 실제 SOURCES에도
+                # 존재하는 경우만 provenance로 인정
                 if document_id not in valid_source_ids:
                     continue
 
@@ -369,8 +453,8 @@ class OpenAILLMService:
                     )
                 )
 
-                # LLM이 evidence에만 별도 문장을
-                # 만들어 넣는 것을 방지한다.
+                # evidence에서 별도의 가짜 문장을
+                # 만들어 넣는 것을 방지
                 if (
                     not normalized_claim
                     or normalized_claim
@@ -452,7 +536,7 @@ class OpenAILLMService:
                 "LLM 결과의 결론이 비어 있습니다."
             )
 
-        return FinalPaper(
+        final_paper = FinalPaper(
             paper_id=str(uuid4()),
             title=title,
             abstract=abstract,
@@ -461,3 +545,20 @@ class OpenAILLMService:
             references=rag_result.sources,
             paper_citations=paper_citations,
         )
+
+        effective_max_chars = (
+            cls.MAX_FINAL_PAPER_CHARS
+            if max_chars is None
+            else min(
+                max_chars,
+                cls.MAX_FINAL_PAPER_CHARS,
+            )
+        )
+
+        cls._validate_final_length(
+            paper=final_paper,
+            max_chars=effective_max_chars,
+        )
+
+        return final_paper
+
