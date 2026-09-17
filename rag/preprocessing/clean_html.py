@@ -50,6 +50,9 @@ def strip_html(raw_html: str) -> str:
 # 대부분이 공통으로 쓰는 정형화된 줄(기자 바이라인+이메일, "입력/수정" 날짜배너, "구글 검색
 # 선호 출처로 추가", "공유하기 카카오톡/페이스북/..." 위젯, 슬래시 섞인 카테고리 메뉴 나열)을
 # 텍스트 패턴으로 잡아서 제거.
+#
+# 2026-09-17 추가: "이전 기사보기 다음 기사보기" 같은 기사 내비게이션 링크, "[사진: 유디오
+# 홈페이지] ◆" 같은 사진 캡션 줄도 같은 방식(정형화된 텍스트 패턴)으로 잡아서 제거.
 
 _BYLINE_EMAIL_RE = re.compile(
     r"^.{0,20}(기자|특파원|인턴기자)\s*\([^()\n]{0,60}@[^()\n]{0,60}\)\s*$"
@@ -64,12 +67,29 @@ _SHARE_WIDGET_RE = re.compile(
 )
 _SNS_SOLO_RE = re.compile(r"^(카카오톡|페이스북|트위터|블로그|URL\s*복사|주소\s*복사|X)$")
 
+# "이전 기사보기", "다음 기사보기"가 한 줄에 하나 또는 둘 다(순서 무관) 붙어 나오는 페이지
+# 내비게이션 줄. 실제 기사 문장에서 이 정확한 어구가 이런 식으로 반복될 일은 없다고 보고
+# 정형 패턴으로 처리.
+_ARTICLE_NAV_RE = re.compile(
+    r"^(?:이전\s*기사\s*보기|다음\s*기사\s*보기)"
+    r"(?:\s+(?:이전\s*기사\s*보기|다음\s*기사\s*보기))*\s*$"
+)
+
+# "[사진: 유디오 홈페이지]"처럼 대괄호로 감싼 사진 출처/캡션 표기. 뒤에 "◆" 구분자와 짧은
+# 크레딧(사진기자명 등)이 붙는 경우까지 포함. 대괄호 안 내용은 80자로 제한해서, 본문 중간에
+# 우연히 대괄호가 쓰인 긴 인용구까지 잘못 지우는 걸 피함.
+_PHOTO_CAPTION_RE = re.compile(
+    r"^\[\s*사진\s*[:：]?\s*[^\[\]\n]{0,80}\]\s*(◆.{0,40})?$"
+)
+
 _BOILERPLATE_LINE_PATTERNS = [
     _BYLINE_EMAIL_RE,
     _DATE_BANNER_RE,
     _GOOGLE_PREFERRED_SOURCE_RE,
     _SHARE_WIDGET_RE,
     _SNS_SOLO_RE,
+    _ARTICLE_NAV_RE,
+    _PHOTO_CAPTION_RE,
 ]
 
 _CATEGORY_TOKEN_RE = re.compile(r"^[가-힣A-Za-z0-9]{1,8}(/[가-힣A-Za-z0-9]{1,8})?$")
@@ -82,16 +102,17 @@ def _looks_like_menu_line(line: str) -> bool:
     tokens = line.split()
     if len(tokens) < 6:
         return False
-    if any(ch in line for ch in ".!?\"'\u201c\u201d\u300c\u300d"):
+    if any(ch in line for ch in ".!?\"'“”「」"):
         return False
     return all(_CATEGORY_TOKEN_RE.match(tok) for tok in tokens)
 
 
 def strip_boilerplate_lines(text: str) -> str:
     """기자 바이라인+이메일, "입력/수정" 날짜배너, "구글 검색 선호 출처로 추가", 공유하기
-    위젯(카카오톡/페이스북/...), 카테고리 메뉴 나열처럼 한국 언론사 CMS 대부분이 공통으로
-    쓰는 정형화된 잡음 줄을 제거. strip_noise_tags()가 태그 기반이라 못 잡는, class/구조가
-    사이트마다 다른 잡음을 텍스트 패턴으로 보완하는 두 번째 방어선.
+    위젯(카카오톡/페이스북/...), 기사 내비게이션("이전/다음 기사보기"), 사진 캡션("[사진: ...]"),
+    카테고리 메뉴 나열처럼 한국 언론사 CMS 대부분이 공통으로 쓰는 정형화된 잡음 줄을 제거.
+    strip_noise_tags()가 태그 기반이라 못 잡는, class/구조가 사이트마다 다른 잡음을 텍스트
+    패턴으로 보완하는 두 번째 방어선.
     collector들이 get_text()로 뽑은 직후, normalize_whitespace() 전후로 호출할 것."""
     kept = []
     for line in text.split("\n"):
