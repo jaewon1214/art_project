@@ -1,0 +1,22 @@
+{
+  "train_runtime": 15805.8154,
+  "train_samples_per_second": 0.086,
+  "train_steps_per_second": 0.011,
+  "total_flos": 5815113192161280.0,
+  "train_loss": 2.719201356865639,
+  "epoch": 4.0,
+  "final_eval_loss": 2.5040831565856934,
+  "final_eval_runtime": 201.2864,
+  "final_eval_samples_per_second": 0.308,
+  "final_eval_steps_per_second": 0.308,
+  "final_epoch": 4.0,
+  "final_perplexity": 12.232338683802368,
+  "best_checkpoint": "E:\\자료실\\art_project\\paper_generator\\models\\paper-qwen-lora\\checkpoint-170",
+  "base_model": "Qwen/Qwen2.5-1.5B-Instruct",
+  "max_length": 768,
+  "lora_r": 8,
+  "lora_alpha": 16,
+  "lora_dropout": 0.05,
+  "train_samples": 338,
+  "validation_samples": 62
+}

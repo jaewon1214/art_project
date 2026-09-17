@@ -1,0 +1,22 @@
+{
+  "metadata_file": "data\\raw\\collected_metadata_with_license.jsonl",
+  "total_metadata": 197,
+  "json_created": 195,
+  "pdf_not_found": 1,
+  "section_exact": 87,
+  "section_partial": 95,
+  "section_unparsed": 13,
+  "categories": {
+    "copyright": 30,
+    "authorship": 72,
+    "voice_cloning": 46,
+    "music_generation": 47
+  },
+  "licenses": {
+    "arXiv non-exclusive distribution license": 98,
+    "CC BY-NC-SA 4.0": 6,
+    "CC BY 4.0": 73,
+    "CC BY-SA 4.0": 7,
+    "CC BY-NC-ND 4.0": 11
+  }
+}
