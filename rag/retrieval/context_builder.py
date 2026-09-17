@@ -4,8 +4,16 @@
 3번(backend)이 이 함수 하나만 import해서 씀. 시그니처가 바뀌면 3번 코드도 같이 깨지니
 바꿀 일 있으면 미리 공유할 것.
 
-내부적으로 Vector Search + Keyword Search + Graph Search(Neo4j) 세 경로를 RRF로 합쳐서
+내부적으로 Vector Search + Keyword Search + Graph Search(Neo4j) + Exact-Match Search
+(쿼리에 들어있는 고유명사/사건명이 content에 그대로 있는지) 네 경로를 RRF로 합쳐서
 반환함 — search_context()의 입출력 형식 자체는 그대로라 backend는 신경 쓸 필요 없음.
+
+2026-09-17: Exact-Match Search 채널 추가(rag/retrieval/exact_match_search.py) — "Concord Music
+Group" 같은 사건 당사자명이 쿼리에 정확히 포함된 경우, 일반적인 AI 음악 관련 문서보다 그
+사건을 직접 다룬 문서가 Top-K에 우선적으로 오르도록 하기 위함. RRF에 이 채널의 결과를 두 번
+넣어서(reciprocal_rank_fusion 호출부 참고) 가중치를 강하게 줌 — vector/keyword/graph 세 경로는
+"의미적으로 비슷한지"/"형태소가 겹치는지"만 보고 정확 일치 여부를 직접 반영하지 못했던 빈틈을
+메우는 채널이라, 다른 세 채널과 동일한 가중치로는 신호가 묻힐 수 있어서 의도적으로 2배로 줌.
 
 반환 형식(공통 규약):
 {
@@ -22,6 +30,7 @@ from __future__ import annotations
 
 from database.config import get_connection
 from rag.embedding.embed import embed_texts
+from rag.retrieval.exact_match_search import exact_match_search
 from rag.retrieval.graph_search import graph_search
 from rag.retrieval.hybrid_rrf import reciprocal_rank_fusion
 from rag.retrieval.keyword_search import keyword_search
@@ -73,8 +82,14 @@ def search_context(topic: str, category: str | None = None, top_k: int = 5) -> d
 
         kw_results = keyword_search(conn, topic, category=category, top_k=50)
         graph_results = graph_search(conn, topic, top_k=30)
+        exact_results = exact_match_search(conn, topic, category=category, top_k=30)
 
-        fused = reciprocal_rank_fusion(vec_results, kw_results, graph_results, top_k=top_k)
+        # exact_results를 두 번 넣어서 RRF 가중치를 강하게 줌 — 고유명사 exact match는
+        # vector/keyword/graph 세 경로가 놓칠 수 있는 신호라 한 번만 넣으면 다른 세 채널에
+        # 묻힐 수 있음(위 모듈 docstring 참고).
+        fused = reciprocal_rank_fusion(
+            vec_results, kw_results, graph_results, exact_results, exact_results, top_k=top_k
+        )
         sources = _fetch_sources(conn, list({r["document_id"] for r in fused}))
 
     contexts = [
