@@ -43,9 +43,13 @@ function App() {
     <div className="app">
       <header className="top-header">
         <div className="top-header-inner">
-          <div>
+          <div className="brand-mark">
+            <span>AI</span>
+          </div>
+
+          <div className="brand-copy">
             <p className="service-label">
-              GENERATIVE AI RESEARCH
+              AI MUSIC RESEARCH
             </p>
 
             <h1>
@@ -53,84 +57,166 @@ function App() {
             </h1>
 
             <p className="header-description">
-              RAG 검색, Transformer 초안 생성,
-              LangChain과 LLM 검증을 통해
+              RAG 기반 근거 검색과 Transformer 초안,
+              LLM 검증을 결합하여 신뢰할 수 있는
               연구 논문 초안을 생성합니다.
             </p>
-          </div>
-
-          <div className="system-status">
-            <span className="status-dot" />
-            Backend Ready
           </div>
         </div>
       </header>
 
       <main className="main-content">
-        <section className="generator-card">
-          <div className="card-heading">
-            <span>01</span>
-
-            <div>
-              <h2>연구 주제 설정</h2>
-
-              <p>
-                연구하고 싶은 주제와 목표 분량을
-                입력하세요.
-              </p>
+        <div className="workspace-grid">
+          <aside className="control-panel">
+            <div className="panel-eyebrow">
+              RESEARCH SETTINGS
             </div>
-          </div>
 
-          <PaperForm
-            topic={topic}
-            setTopic={setTopic}
-            length={length}
-            setLength={setLength}
-            onSubmit={handleGenerate}
-            loading={loading}
-          />
-        </section>
-
-        {loading && (
-          <section className="loading-card">
-            <div className="loader" />
-
-            <div>
-              <h2>논문을 생성하고 있습니다.</h2>
-
-              <p>
-                RAG 검색, 초안 생성 및 LLM 검증을
-                진행하고 있습니다.
-              </p>
-            </div>
-          </section>
-        )}
-
-        {error && (
-          <section className="error-card">
-            <strong>논문 생성 실패</strong>
-            <p>{error}</p>
-          </section>
-        )}
-
-        {paper && (
-          <section className="result-wrapper">
-            <div className="card-heading">
-              <span>02</span>
+            <div className="panel-heading">
+              <span className="panel-number">
+                01
+              </span>
 
               <div>
-                <h2>생성 결과</h2>
-
+                <h2>연구 설정</h2>
                 <p>
-                  생성된 논문과 참고 출처를
-                  확인할 수 있습니다.
+                  연구 주제와 목표 분량을 설정합니다.
                 </p>
               </div>
             </div>
 
-            <PaperResult paper={paper} />
+            <PaperForm
+              topic={topic}
+              setTopic={setTopic}
+              length={length}
+              setLength={setLength}
+              onSubmit={handleGenerate}
+              loading={loading}
+            />
+
+            <div className="pipeline-guide">
+              <p className="pipeline-title">
+                생성 과정
+              </p>
+
+              <div className="pipeline-step">
+                <span>01</span>
+                <div>
+                  <strong>근거 자료 검색</strong>
+                  <p>RAG 기반 관련 자료 탐색</p>
+                </div>
+              </div>
+
+              <div className="pipeline-line" />
+
+              <div className="pipeline-step">
+                <span>02</span>
+                <div>
+                  <strong>논문 초안 생성</strong>
+                  <p>Transformer 기반 구조 구성</p>
+                </div>
+              </div>
+
+              <div className="pipeline-line" />
+
+              <div className="pipeline-step">
+                <span>03</span>
+                <div>
+                  <strong>근거 검증 및 정제</strong>
+                  <p>LLM 기반 인용 및 문장 검증</p>
+                </div>
+              </div>
+            </div>
+          </aside>
+
+          <section className="paper-workspace">
+            <div className="workspace-heading">
+              <div>
+                <p className="workspace-label">
+                  RESEARCH PAPER
+                </p>
+
+                <h2>논문 미리보기</h2>
+              </div>
+
+              <span className="target-length">
+                목표 {length.toLocaleString()}자
+              </span>
+            </div>
+
+            {!paper && !loading && !error && (
+              <div className="empty-state">
+                <div className="empty-document">
+                  <div className="document-line line-title" />
+                  <div className="document-line line-short" />
+
+                  <div className="document-gap" />
+
+                  <div className="document-line" />
+                  <div className="document-line" />
+                  <div className="document-line line-medium" />
+
+                  <div className="document-gap" />
+
+                  <div className="document-line" />
+                  <div className="document-line line-short" />
+                </div>
+
+                <h3>
+                  아직 생성된 논문이 없습니다.
+                </h3>
+
+                <p>
+                  왼쪽에서 연구 주제를 설정한 뒤
+                  논문 생성을 시작하세요.
+                </p>
+              </div>
+            )}
+
+            {loading && (
+              <div className="loading-card">
+                <div className="loader" />
+
+                <div>
+                  <p className="loading-label">
+                    GENERATING PAPER
+                  </p>
+
+                  <h3>
+                    논문을 생성하고 있습니다.
+                  </h3>
+
+                  <p>
+                    근거 검색, 초안 구성 및
+                    LLM 검증을 진행하고 있습니다.
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {error && (
+              <div className="error-card">
+                <div className="error-icon">
+                  !
+                </div>
+
+                <div>
+                  <strong>
+                    논문 생성에 실패했습니다.
+                  </strong>
+
+                  <p>{error}</p>
+                </div>
+              </div>
+            )}
+
+            {paper && (
+              <div className="result-wrapper">
+                <PaperResult paper={paper} />
+              </div>
+            )}
           </section>
-        )}
+        </div>
       </main>
     </div>
   );
