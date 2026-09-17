@@ -11,7 +11,11 @@ from backend.app.services.transformer_service import TransformerService
 
 class PaperService:
     RAG_TIMEOUT = 30
-    TRANSFORMER_TIMEOUT = 60
+
+    # 실제 Qwen2.5-1.5B + LoRA는 최초 모델 로딩과
+    # 5개 섹션 생성에 시간이 걸릴 수 있으므로 여유 있게 설정한다.
+    TRANSFORMER_TIMEOUT = 300
+
     LLM_TIMEOUT = 180
 
     def __init__(self) -> None:
