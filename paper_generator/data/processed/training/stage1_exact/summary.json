@@ -1,0 +1,13 @@
+{
+  "paper_count": 45,
+  "sample_count": 935,
+  "train_sample_count": 833,
+  "validation_sample_count": 102,
+  "section_counts": {
+    "title": 45,
+    "abstract": 45,
+    "introduction": 44,
+    "body": 756,
+    "conclusion": 45
+  }
+}

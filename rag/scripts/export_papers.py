@@ -10,8 +10,16 @@
 
 출력: rag/exports/papers_YYYYMMDD_HHMMSS.jsonl — 한 줄에 논문 하나(JSON object).
 필드: id(document_id, 나중에 RAG쪽 chunk/citation과 대조하고 싶을 때 대조키로 쓸 수 있음),
-      title, abstract(=documents.content), url, author, category, published_at,
-      language, source(발행처/플랫폼 — arXiv | Semantic Scholar), created_at.
+      title, abstract(=documents.content), content_type("abstract" | "full_text" — 아래 설명),
+      url, author, category, published_at, language,
+      source(발행처/플랫폼 — arXiv | Semantic Scholar | 로컬 PDF 업로드), created_at.
+
+⚠️ content_type 구분 — abstract 필드 이름과 달리 실제로는 두 종류가 섞여 있음:
+  - source가 "arXiv"/"Semantic Scholar"인 논문 -> 초록(abstract)만 수집됨(원문 API가
+    그렇게 줌), content_type="abstract"
+  - source가 "로컬 PDF 업로드"(rag/scripts/ingest_pdfs.py로 직접 넣은 논문) -> PDF
+    전체 텍스트가 들어있음, content_type="full_text"
+  파인튜닝 데이터로 쓸 때 이 구분을 무시하고 전부 "전체 본문"이라고 가정하면 안 됨.
 
 실행 (secondpj 루트에서, 서버 DB 접속 가능한 PC에서):
     python -m rag.scripts.export_papers
@@ -50,12 +58,19 @@ def main() -> None:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     out_path = EXPORTS_DIR / f"papers_{timestamp}.jsonl"
 
+    # arXiv/Semantic Scholar는 API 자체가 초록만 주고, 로컬 PDF 업로드는 전체 텍스트가 들어있음 —
+    # 이 차이를 모르고 전부 "전체 본문"이라고 가정하면 파인튜닝 데이터 품질에 영향을 줄 수 있어서
+    # 명시적으로 필드를 나눔.
+    _ABSTRACT_ONLY_SOURCES = {"arXiv", "Semantic Scholar"}
+
     with open(out_path, "w", encoding="utf-8") as f:
-        for doc_id, title, content, url, author, category, published_at, language, source_name, created_at in rows:
+        for doc_id, title, doc_content, url, author, category, published_at, language, source_name, created_at in rows:
+            content_type = "abstract" if source_name in _ABSTRACT_ONLY_SOURCES else "full_text"
             record = {
                 "id": str(doc_id),
                 "title": title,
-                "abstract": content,
+                "abstract": doc_content,
+                "content_type": content_type,
                 "url": url,
                 "author": author,
                 "category": category,

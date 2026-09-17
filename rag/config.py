@@ -11,6 +11,10 @@ from dotenv import load_dotenv
 from database.config import DB_HOST, DB_NAME, DB_PASSWORD, DB_PORT, DB_USER  # noqa: F401
 from database.config import NEO4J_PASSWORD, NEO4J_URI, NEO4J_USER  # noqa: F401
 from database.config import get_connection, get_neo4j_driver  # noqa: F401
+# documents.category로 쓸 수 있는 값의 화이트리스트 — search_context()를 category 필터와
+# 같이 쓰는 쪽(3번/backend)이 오타 없이 정확한 문자열을 쓰게 하려고 재수출. 원본은
+# database/neo4j/known_types.py(엔티티 추출 LLM이 문서를 분류할 때 검증에도 같이 씀).
+from database.neo4j.known_types import CATEGORIES  # noqa: F401
 
 load_dotenv()
 

@@ -10,7 +10,12 @@ from datetime import date
 import requests
 from bs4 import BeautifulSoup
 
-from rag.preprocessing.clean_html import is_too_short, normalize_whitespace, strip_noise_tags
+from rag.preprocessing.clean_html import (
+    is_too_short,
+    normalize_whitespace,
+    strip_boilerplate_lines,
+    strip_noise_tags,
+)
 
 _BROWSER_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -108,7 +113,7 @@ def _fetch_page(url: str) -> tuple[str, str]:
     strip_noise_tags(soup)
     body = soup.find("article") or soup.find("main") or soup.find("body")
     content = body.get_text(separator="\n", strip=True) if body else ""
-    return title, normalize_whitespace(content)
+    return title, normalize_whitespace(strip_boilerplate_lines(content))
 
 
 def collect() -> list[dict]:

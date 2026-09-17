@@ -41,9 +41,12 @@ def chunk_text(text: str, chunk_size: int = DEFAULT_CHUNK_SIZE, overlap: int = D
 def build_chunk_rows(document_id: str, text: str) -> list[dict]:
     """chunks 테이블 insert용 row 리스트. embedding은 embedding/embed.py에서 채움.
 
-    content_tokenized가 비어있게(형태소 분석 결과 없음) 나오는 극단적인 경우(숫자/기호뿐인
-    chunk 등)를 대비해 원문(content)으로 폴백 — content_tsv 생성식에도 동일하게
-    coalesce(content_tokenized, content) 처리가 이중으로 돼있음(schema.sql 참고)."""
+    content_tokenized가 비어있게 나오는 경우 원문(content)으로 폴백 — 원래는 숫자/기호뿐인
+    chunk 같은 극단적 케이스만 염두에 뒀는데, 2026-09-17부터는 tokenize_for_search()가
+    kiwipiepy 초기화 실패/특정 입력에서의 분석 실패도 예외 대신 빈 문자열로 반환하므로
+    (korean_tokenize.py 참고) 그런 경우도 같은 경로로 폴백됨 — kiwi가 죽어도 문서 자체가
+    유실되지 않고 그 청크만 형태소 분석 없이(원문 그대로) 저장됨. content_tsv 생성식에도
+    동일하게 coalesce(content_tokenized, content) 처리가 이중으로 돼있음(schema.sql 참고)."""
     pieces = chunk_text(text)
     return [
         {
