@@ -147,13 +147,73 @@ def _looks_like_ui_widget_line(line: str) -> bool:
     return hits / len(tokens) >= 0.6
 
 
+# ---------------------------------------------------------------------
+# 2026-09-17 추가 3: 여러 줄에 걸쳐 "한 줄에 항목 하나씩" 나열되는 메뉴/내비게이션 블록 제거
+# ---------------------------------------------------------------------
+# 지금까지의 _looks_like_menu_line/_looks_like_ui_widget_line은 "한 줄 안에" 짧은 명사가
+# 여러 개 뭉쳐있는 경우만 잡는데, YTN처럼 메뉴 항목이 한 줄에 하나씩 쭉 나열되는 사이트
+# (예: "정치\n경제\n사회\n전국\n...", "YTN 사이언스\nYTN 라디오\n..." 처럼 브랜드/채널명까지
+# 섞여 나옴)는 줄 하나만 보면 그냥 평범한 단어라 기존 필터로는 못 걸러짐. 이런 메뉴는
+# 사이트 브랜드명(YTN 사이언스, INSIDE YTN, 남산서울타워 등)까지 섞여 있어서 단어 사전으로
+# 다 못 외우므로, 대신 "짧고 문장부호 없는 줄이 일정 개수 이상 연속으로 나온다"는 구조적
+# 신호로 감지 — 실제 기사 본문은 보통 문장 단위(마침표 등)라 이런 긴 스트릭이 잘 안 나옴.
+_MENU_RUN_MIN_LINES = 8       # 이 이상 연속되면 메뉴 블록으로 간주(오탐 방지를 위해 보수적으로)
+_MENU_CANDIDATE_MAX_LEN = 20  # 이보다 길면 메뉴 항목이라기보단 실제 문장일 가능성이 높음
+
+
+def _is_menu_candidate_line(stripped: str) -> bool:
+    """짧고 문장부호가 없는 줄 — 메뉴 항목 스트릭의 구성원 후보. 이 함수 하나만으로는 지우지
+    않고, _strip_menu_runs()에서 연속 개수를 보고 최종 판단함(단독으로는 오탐 위험이 큼 —
+    예: 실제 기사의 짧은 인용구 한 줄)."""
+    if not stripped or len(stripped) > _MENU_CANDIDATE_MAX_LEN:
+        return False
+    if any(ch in stripped for ch in ".!?\"'“”「」,"):
+        return False
+    return True
+
+
+def _strip_menu_runs(lines: list[str]) -> list[str]:
+    """_is_menu_candidate_line()이 참인 줄이 _MENU_RUN_MIN_LINES개 이상 연속되면(빈 줄은
+    스트릭을 끊지 않고 건너뜀) 그 구간 전체(빈 줄 포함)를 제거. strip_boilerplate_lines()가
+    한 줄씩 보는 필터들을 다 적용해서 명백한 잡음 줄을 먼저 걷어낸 뒤, 남은 줄들에 대해
+    마지막으로 이 함수로 다중 줄 구조를 한 번 더 훑음."""
+    n = len(lines)
+    keep = [True] * n
+    i = 0
+    while i < n:
+        stripped_i = lines[i].strip()
+        if stripped_i and not _is_menu_candidate_line(stripped_i):
+            i += 1
+            continue
+        j = i
+        candidate_count = 0
+        while j < n:
+            s = lines[j].strip()
+            if not s:
+                j += 1
+                continue
+            if not _is_menu_candidate_line(s):
+                break
+            candidate_count += 1
+            j += 1
+        if candidate_count >= _MENU_RUN_MIN_LINES:
+            for k in range(i, j):
+                keep[k] = False
+        i = j if j > i else i + 1
+    return [line for line, k in zip(lines, keep) if k]
+
+
 def strip_boilerplate_lines(text: str) -> str:
     """기자 바이라인+이메일, "입력/수정" 날짜배너, "구글 검색 선호 출처로 추가", 공유하기
     위젯(카카오톡/페이스북/...), 기사 내비게이션("이전/다음 기사보기"), 사진 캡션("[사진: ...]"),
     댓글반응바/글자크기조절 등 UI 위젯 줄, 카테고리 메뉴 나열처럼 한국 언론사 CMS 대부분이
     공통으로 쓰는 정형화된 잡음 줄을 제거. strip_noise_tags()가 태그 기반이라 못 잡는,
     class/구조가 사이트마다 다른 잡음을 텍스트 패턴으로 보완하는 두 번째 방어선.
-    collector들이 get_text()로 뽑은 직후, normalize_whitespace() 전후로 호출할 것."""
+    collector들이 get_text()로 뽑은 직후, normalize_whitespace() 전후로 호출할 것.
+
+    2026-09-17: 한 줄씩 보는 필터(정규식/토큰비율)를 다 적용한 뒤, 마지막으로
+    _strip_menu_runs()로 "짧은 줄이 길게 연속되는" 구조적 잡음(YTN처럼 메뉴 항목이 한 줄에
+    하나씩 나열되는 경우)까지 한 번 더 걸러냄."""
     kept = []
     for line in text.split("\n"):
         stripped = line.strip()
@@ -165,4 +225,5 @@ def strip_boilerplate_lines(text: str) -> str:
         if _looks_like_menu_line(stripped) or _looks_like_ui_widget_line(stripped):
             continue
         kept.append(line)
+    kept = _strip_menu_runs(kept)
     return "\n".join(kept)
