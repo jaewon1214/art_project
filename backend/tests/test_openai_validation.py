@@ -358,3 +358,158 @@ def test_final_paper_under_length_limit_is_allowed():
         )
         <= 4500
     )
+def test_output_text_is_cleaned():
+    generated = GeneratedPaperContent(
+        title='"생성형 AI와 음악 창작&#x20;"',
+        abstract="<p>초록&nbsp;내용입니다.</p>",
+        sections=[
+            GeneratedSection(
+                heading="1. 서론",
+                content=(
+                    "1\n"
+                    "<p>본문&nbsp;내용입니다.</p>"
+                ),
+                citations=[],
+                evidence=[],
+            ),
+        ],
+        conclusion=(
+            "<div>결론&#x20;내용입니다.</div>"
+        ),
+    )
+
+    result = OpenAILLMService._build_final_paper(
+        generated=generated,
+        rag_result=make_rag_result(),
+    )
+
+    assert result.title == "생성형 AI와 음악 창작"
+    assert result.abstract == "초록 내용입니다."
+
+    assert (
+        result.sections[0].content
+        == "본문 내용입니다."
+    )
+
+    assert result.conclusion == "결론 내용입니다."
+
+    assert "&#x20;" not in result.title
+    assert "<p>" not in result.abstract
+    assert "<div>" not in result.conclusion
+
+
+def test_internal_generation_process_is_rejected():
+    generated = GeneratedPaperContent(
+        title="생성형 AI와 음악 창작",
+        abstract="연구 초록입니다.",
+        sections=[
+            GeneratedSection(
+                heading="서론",
+                content=(
+                    "Transformer 초안과 "
+                    "RAG 검색 근거를 결합하여 "
+                    "논문을 작성하였다."
+                ),
+                citations=[],
+                evidence=[],
+            ),
+        ],
+        conclusion="연구 결론입니다.",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="내부 구현 정보",
+    ):
+        OpenAILLMService._build_final_paper(
+            generated=generated,
+            rag_result=make_rag_result(),
+        )
+def test_generated_text_cleanup():
+    generated = GeneratedPaperContent(
+        title='"생성형 AI와 음악 창작&#x20;"',
+        abstract=(
+            "<p>생성형&nbsp;AI 음악 연구에 대한 "
+            "초록입니다.</p>"
+        ),
+        sections=[
+            GeneratedSection(
+                heading="1. 서론",
+                content=(
+                    "1\n"
+                    "<p>생성형&nbsp;AI 음악의 "
+                    "저작권 쟁점을 검토한다.</p>"
+                ),
+                citations=[],
+                evidence=[],
+            ),
+        ],
+        conclusion=(
+            "<div>연구의 결론&#x20;입니다.</div>"
+        ),
+    )
+
+    result = OpenAILLMService._build_final_paper(
+        generated=generated,
+        rag_result=make_rag_result(),
+    )
+
+    assert (
+        result.title
+        == "생성형 AI와 음악 창작"
+    )
+
+    assert (
+        result.abstract
+        == "생성형 AI 음악 연구에 대한 초록입니다."
+    )
+
+    assert (
+        result.sections[0].content
+        == "생성형 AI 음악의 저작권 쟁점을 검토한다."
+    )
+
+    assert (
+        result.conclusion
+        == "연구의 결론 입니다."
+    )
+
+    assert "&#x20;" not in result.title
+    assert "&nbsp;" not in result.abstract
+
+    assert "<p>" not in result.abstract
+    assert "<p>" not in result.sections[0].content
+    assert "<div>" not in result.conclusion
+
+    assert (
+        not result.sections[0].content.startswith("1")
+    )
+
+
+def test_internal_generation_process_is_rejected():
+    generated = GeneratedPaperContent(
+        title="생성형 AI와 음악 창작",
+        abstract="연구 초록입니다.",
+        sections=[
+            GeneratedSection(
+                heading="서론",
+                content=(
+                    "Transformer 초안과 "
+                    "RAG 검색 근거를 결합하여 "
+                    "최종 논문을 작성하였다."
+                ),
+                citations=[],
+                evidence=[],
+            ),
+        ],
+        conclusion="연구 결론입니다.",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="내부 구현 정보",
+    ):
+        OpenAILLMService._build_final_paper(
+            generated=generated,
+            rag_result=make_rag_result(),
+        )
