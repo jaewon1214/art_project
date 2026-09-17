@@ -4,8 +4,16 @@ Neo4j 기반 그래프 검색 — Vector/Keyword Search랑 짝을 이루는 세 
 loader.py는 Postgres -> Neo4j로 "쓰는" 쪽이고, 이 모듈은 반대로 Neo4j에서 "찾아 읽는" 쪽.
 
 방식: query_text에서 뽑은 단어들과 이름이 겹치는 엔티티(Artist/Company/AIModel/Topic/Case/Law)를
-Neo4j에서 찾고, 그 엔티티랑 연결된 Paper 노드(-> documents)를 "매칭된 엔티티 개수"로 랭킹한 뒤,
+Neo4j에서 찾고, 그 엔티티랑 연결된 Paper 노드(-> documents)를 가중치 점수로 랭킹한 뒤,
 Postgres에서 그 문서들의 chunk를 전부 끌어와 후보로 반환한다.
+
+2026-09-17: 랭킹 기준을 "매칭된 엔티티 개수"(count)에서 "관계 타입 x 엔티티 타입 가중치 합"으로
+변경 — 예전엔 회사명을 여럿 스쳐 언급(MENTIONS)만 한 일반 기사가, 사건 하나를 정면으로 다룬
+(DISCUSSES) 기사보다 매칭 엔티티 수가 많다는 이유로 더 높은 순위를 받는 문제가 있었음
+(예: "Sony/Warner/Universal/Anthropic 등 업계 동향" 기사가, "Concord Music Group v. Anthropic"
+사건 자체를 다룬 기사보다 위로 올라옴). 이제는 DISCUSSES(핵심 주제로 다룸)가 MENTIONS(단순 언급)
+보다, Case 엔티티(구체적 사건명) 매칭이 다른 엔티티 타입 매칭보다 더 높은 가중치를 받아서,
+쿼리의 사건명/당사자명이 정확히 걸리는 문서가 우선적으로 올라오게 함.
 
 반환 형식은 vector_search/keyword_search랑 동일 — [{"chunk_id","document_id","content","rank"}] —
 그래서 hybrid_rrf.reciprocal_rank_fusion()에 그대로 같이 넣을 수 있다.
@@ -25,17 +33,33 @@ def _extract_tokens(query_text: str) -> list[str]:
     return [t for t in query_text.split() if len(t) >= _MIN_TOKEN_LEN]
 
 
+# 관계 타입 가중치 — DISCUSSES(핵심 주제로 다룸)가 CITES(근거로 인용)보다, CITES가
+# MENTIONS/RELATED_TO(단순 언급/일반 연관)보다 문서-엔티티 연결이 더 강함을 반영.
+_RELATION_WEIGHT_CYPHER = (
+    "CASE type(r) WHEN 'DISCUSSES' THEN 3 WHEN 'CITES' THEN 2 ELSE 1 END"
+)
+# 엔티티 타입 가중치 — 쿼리에 구체적 사건명(Case)이 들어있는 경우, 그 사건 자체를 다루는
+# 문서가 회사/아티스트명만 겹치는 문서보다 훨씬 강하게 올라와야 하므로 Case를 특별 대우.
+_ENTITY_WEIGHT_CYPHER = "CASE WHEN e:Case THEN 3 ELSE 1 END"
+
+
 def _find_related_document_ids(tokens: list[str], top_k_docs: int) -> list[str]:
     """토큰과 이름이 겹치는 엔티티에 연결된 Paper의 pg_document_id를,
-    매칭된 엔티티 수(연결 강도) 내림차순으로 top_k_docs개 반환."""
+    (관계 타입 가중치 x 엔티티 타입 가중치) 합산 점수 내림차순으로 top_k_docs개 반환.
+
+    WITH DISTINCT p, e, r로 (문서, 엔티티, 관계) 조합을 먼저 중복 제거하는 이유: 여러 토큰이
+    같은 엔티티 이름에 동시에 매칭되면(예: "Concord"와 "Music"이 둘 다 "Concord Music Group"에
+    CONTAINS 매칭) UNWIND 특성상 같은 (p,e,r) 행이 토큰 수만큼 중복돼서 점수가 부풀 수 있음."""
     label_filter = " OR ".join(f"e:{label}" for label in _ENTITY_LABELS)
     cypher = f"""
         UNWIND $tokens AS token
         MATCH (e)
         WHERE ({label_filter}) AND toLower(e.name) CONTAINS toLower(token)
-        MATCH (p:Paper)-[]->(e)
-        RETURN p.pg_document_id AS document_id, count(DISTINCT e) AS match_count
-        ORDER BY match_count DESC
+        MATCH (p:Paper)-[r]->(e)
+        WITH DISTINCT p, e, r
+        WITH p, sum({_RELATION_WEIGHT_CYPHER} * {_ENTITY_WEIGHT_CYPHER}) AS score
+        RETURN p.pg_document_id AS document_id, score
+        ORDER BY score DESC
         LIMIT $limit
     """
     driver = get_neo4j_driver()
