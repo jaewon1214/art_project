@@ -21,8 +21,22 @@ class PaperPromptChain:
             rag_result.contexts,
             start=1,
         ):
+            context_data = {
+                "chunk_id": context.chunk_id,
+                "document_id": context.document_id,
+                "score": context.score,
+                "content": context.content,
+            }
+
             context_blocks.append(
-                f"[CONTEXT {index}]\n{context}"
+                (
+                    f"[CONTEXT {index}]\n"
+                    + json.dumps(
+                        context_data,
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                )
             )
 
         return "\n\n".join(context_blocks)
@@ -42,11 +56,13 @@ class PaperPromptChain:
                 "title": source.title,
                 "url": source.url,
                 "publisher": source.publisher,
+                "author": source.author,
                 "published_at": (
                     source.published_at.isoformat()
                     if source.published_at
                     else None
                 ),
+                "category": source.category,
             }
 
             source_blocks.append(

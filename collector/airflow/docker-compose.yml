@@ -1,0 +1,44 @@
+# 로컬 PC에서 돌리는 Airflow — standalone 모드(SQLite, 컨테이너 1개)로 "뉴스 RSS/API 주기 수집"
+# DAG만 돌리는 용도. 서버(EC2)의 database/docker-compose.yml(Postgres+Neo4j)과는 완전히 별개 파일이고
+# 서버에서는 절대 이 파일을 실행하지 말 것 — EC2는 t3.small(2GiB)이라 Airflow까지 얹으면 다운됨.
+#
+# 실행 (이 폴더, collector/airflow/ 에서):
+#   docker compose up -d
+#   docker compose logs -f airflow
+#     -> "Login with username: admin  password: xxxxxxxx" 나올 때까지 대기 (최초 기동은 1~2분 걸림 —
+#        _PIP_ADDITIONAL_REQUIREMENTS로 매번 패키지를 설치하는 quick-start 방식이라 그럼)
+#   브라우저에서 http://localhost:8080 접속 → 로그 속 admin/password로 로그인
+#   DAG 목록에서 "collect_news" 찾아서 토글 켜기(Unpause) → 스케줄대로 자동 실행됨
+#
+# ⚠️ ../../.env (repo 루트의 .env, 로컬용)를 그대로 읽어씀. 그 안의 DB_HOST/NEO4J_URI가 "localhost"로
+#    남아있으면 이 컨테이너 안에서는 그 컨테이너 자신을 가리키게 돼서 서버 DB에 저장이 안 됨 —
+#    반드시 서버 공인 IP로 바꿔둘 것 (repo 루트 .env.example 하단 "서버 DB 접속" 주석 부분 주석 해제).
+#    보안그룹에도 5432/7687 포트에 내 PC(집) IP가 등록돼 있어야 접속됨.
+
+services:
+  airflow:
+    image: apache/airflow:2.9.3
+    container_name: rag_airflow
+    restart: unless-stopped
+    command: standalone
+    env_file:
+      - ../../.env
+    environment:
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+      PYTHONPATH: /opt/airflow/project
+      # quick-start 전용 기능 — 매 기동마다 이 패키지들을 pip install함(운영 배포에는 안 씀,
+      # 7일 스프린트 용도로는 충분). 루트 pyproject.toml의 dependencies와 맞춰둘 것.
+      _PIP_ADDITIONAL_REQUIREMENTS: >-
+        psycopg2-binary>=2.9 python-dotenv>=1.0 requests>=2.32 beautifulsoup4>=4.12
+        feedparser>=6.0 neo4j>=5.0 openai>=1.0,<2.0 anthropic>=0.34,<1.0 pypdf>=4.0
+        aiohttp>=3.10,<4.0 kiwipiepy>=0.18
+    ports:
+      - "${AIRFLOW_PORT:-8080}:8080"
+    volumes:
+      - airflow_home:/opt/airflow
+      - ./dags:/opt/airflow/dags
+      - ../..:/opt/airflow/project:ro
+
+volumes:
+  airflow_home:

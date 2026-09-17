@@ -1,12 +1,17 @@
-# IDE
-.idea/
-
-# Virtual environment
+.env
 .venv/
-
-# Python
 __pycache__/
 *.pyc
+.idea/
+
+# Collector / RAG
+collector/raw/
+rag/data/**/*.pdf
+collector/airflow/logs/
+collector/airflow/plugins/
+collector/airflow/.env
+rag/eval_results/
+rag/exports/
 
 # Paper generator - large/raw data
 paper_generator/data/raw/pdfs/

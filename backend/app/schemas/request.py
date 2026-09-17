@@ -10,7 +10,7 @@ class GenerateRequest(BaseModel):
     )
 
     length: int = Field(
-        default=5000,
+        default=4500,
         ge=1000,
         le=20000,
     )
