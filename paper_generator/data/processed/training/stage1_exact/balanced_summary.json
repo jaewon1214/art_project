@@ -1,0 +1,41 @@
+{
+  "max_body_per_paper": 5,
+  "train": {
+    "before_samples": 833,
+    "after_samples": 338,
+    "paper_count": 38,
+    "before_sections": {
+      "title": 38,
+      "abstract": 38,
+      "introduction": 37,
+      "body": 682,
+      "conclusion": 38
+    },
+    "after_sections": {
+      "title": 38,
+      "abstract": 38,
+      "introduction": 37,
+      "body": 187,
+      "conclusion": 38
+    }
+  },
+  "validation": {
+    "before_samples": 102,
+    "after_samples": 62,
+    "paper_count": 7,
+    "before_sections": {
+      "title": 7,
+      "abstract": 7,
+      "introduction": 7,
+      "body": 74,
+      "conclusion": 7
+    },
+    "after_sections": {
+      "title": 7,
+      "abstract": 7,
+      "introduction": 7,
+      "body": 34,
+      "conclusion": 7
+    }
+  }
+}

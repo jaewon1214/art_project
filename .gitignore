@@ -1,1 +1,27 @@
-.env
+# IDE
+.idea/
+
+# Virtual environment
+.venv/
+
+# Python
+__pycache__/
+*.pyc
+
+# Paper generator - large/raw data
+paper_generator/data/raw/pdfs/
+paper_generator/data/raw/collected/
+paper_generator/data/processed/papers_json/
+
+# Training datasets
+paper_generator/data/processed/training/**/*.jsonl
+
+# Test outputs
+paper_generator/test_outputs/
+
+# Training checkpoints
+paper_generator/models/paper-qwen-lora/checkpoint-*/
+
+# Temporary generator versions
+paper_generator/generator_final.py
+paper_generator/generator_v2.py
