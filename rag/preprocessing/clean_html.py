@@ -51,8 +51,8 @@ def strip_html(raw_html: str) -> str:
 # 선호 출처로 추가", "공유하기 카카오톡/페이스북/..." 위젯, 슬래시 섞인 카테고리 메뉴 나열)을
 # 텍스트 패턴으로 잡아서 제거.
 #
-# 2026-09-17 추가: "이전 기사보기 다음 기사보기" 같은 기사 내비게이션 링크, "[사진: 유디오
-# 홈페이지] ◆" 같은 사진 캡션 줄도 같은 방식(정형화된 텍스트 패턴)으로 잡아서 제거.
+# 2026-09-17 추가: "이전 기사보기" 이전 기사보기" 같은 기사 볭님게이션 링크, "[사진: 유디오
+# 홈페이짅]!◆" 같은 사진캡션 줄도 같은 방식(정형화된 텍스트 패턴)으로 잡아서 제거.
 #
 # 2026-09-17 추가 2: "댓글 좋아요 슬퍼요 화나요 ... 폰트 1단계 13px ... 프린트 제보"처럼
 # 댓글반응바/공유위젯/글자크기 조절 등 여러 UI 컴포넌트 텍스트가 사이트 마크업 구조상
@@ -77,7 +77,7 @@ _SNS_SOLO_RE = re.compile(r"^(카카오톡|페이스북|트위터|블로그|URL\
 # 2026-09-17 추가 4: 정부/공공기관 게시판(한국저작권위원회 보도자료 상세페이지 등) 공통
 # 필드 라벨. "제목"/"담당부서"/"등록일"/"첨부문서"/"미리보기" 처럼 라벨과 값이 줄바꿈으로만
 # 구분돼 나오는 구조라, _strip_menu_runs()의 "8줄 이상 연속" 기준에 못 미치는 경우(예: 라벨이
-# 실제 본문 사이사이 1~2줄씩만 끼어있는 경우)는 못 걸러짐 — 그래서 알려진 라벨 이름 자체를
+# 실제 본문 사이사이 1~2줄씩만 끼어있는 경우)는 못 걸러짐 — 근래서 알려진 라벨 이름 자체를
 # 정형 패턴으로 등록해서 한 줄 전체가 라벨 단어와 정확히 일치할 때만 제거(가운데 "담당부서"라는
 # 단어가 실제 문장 일부로 나올 일은 거의 없다고 보고 SNS_SOLO_RE와 동일한 보수적 기준 적용).
 # 라벨에 딸린 값(부서명/전화번호/날짜/파일명)은 문서 내용으로 남겨둠 — 근거자료로 쓸모가
@@ -218,6 +218,55 @@ def _strip_menu_runs(lines: list[str]) -> list[str]:
     return [line for line, k in zip(lines, keep) if k]
 
 
+# ---------------------------------------------------------------------
+# 2026-09-17 추가 5: 인라인 태그(<a>/<span>/<b> 등) 경계에서 문장이 여러 줄로 쪼개지는
+# 문제 복구 (영어 policy/official 문서에서 발견 — 한국어 기사와 달리 이쪽은 "잡음 줄
+# 추가"가 아니라 "정상 문장이 조각남"이 문제였음)
+# ---------------------------------------------------------------------
+# collector들의 _fetch_page()가 soup.get_text(separator="\n", strip=True)로 본문을 뽑는데,
+# 이 separator는 <p>/<div> 같은 블록 태그뿐 아니라 문장 중간의 <a>/<span> 같은 인라인 태그
+# 경계에도 그대로 삽입됨. WIPO 페이지 실제 수집 결과에서 한 문장이 "WIPO held the / First
+# Session of the WIPO Conversation on IP and AI / in September 2019..." 처럼 3줄로 쪼개져
+# 나오는 게 확인됨(링크가 문장 중간에 박혀있는 구조). 문장부호로 안 끝나는 줄은 다음 줄과
+# 이어붙여서 원래 문장으로 복구 — collector별 _fetch_page()를 다 손보는 대신 공용
+# strip_boilerplate_lines()에서 한 번에 처리.
+_PIPE_SEPARATOR_LINE_RE = re.compile(r"^[|•·»▶>\-–—]+$")
+_SENTENCE_END_RE = re.compile(r'[.!?:;"\'”’)\]』」]\s*$')
+_REFLOW_MAX_BUFFER_CHARS = 400  # 문장부호가 계속 안 나오는 이상 페이지에서 무한정 이어붙이는 걸 막는 안전장치
+
+
+def _reflow_fragmented_lines(text: str) -> str:
+    """문장부호로 끝나지 않는 줄은 다음 줄과 공백으로 이어붙여 원래 문장을 복구.
+    "|"/"•" 등 구분자만 있는 줄(네비게이션 링크 사이 구분자로 흔함)은 문단 경계로 보고
+    빈 줄로 치환 — 그 앞뒤 내용이 서로 이어붙지 않게 막는 역할. 빈 줄(원래부터 있던 문단
+    구분)도 마찬가지로 이어붙이기를 끊음. strip_boilerplate_lines()의 다른 필터들보다
+    반드시 나중에(맨 마지막에) 실행해야 함 — 잡음 줄(게시판 라벨/메뉴 항목)이 아직 살아있는
+    상태에서 먼저 돌리면 그 잡음이 다음 줄(진짜 본문)에 붙어버려서 한 줄 단위 필터와
+    _strip_menu_runs()의 "짧은 줄 연속" 구조 판정을 둘 다 무력화시킴(실측 재현됨)."""
+    normalized = [
+        "" if _PIPE_SEPARATOR_LINE_RE.match(line.strip()) else line
+        for line in text.split("\n")
+    ]
+
+    out: list[str] = []
+    buffer = ""
+    for raw in normalized:
+        stripped = raw.strip()
+        if not stripped:
+            if buffer:
+                out.append(buffer)
+                buffer = ""
+            out.append("")
+            continue
+        buffer = f"{buffer} {stripped}" if buffer else stripped
+        if _SENTENCE_END_RE.search(buffer) or len(buffer) >= _REFLOW_MAX_BUFFER_CHARS:
+            out.append(buffer)
+            buffer = ""
+    if buffer:
+        out.append(buffer)
+    return "\n".join(out)
+
+
 def strip_boilerplate_lines(text: str) -> str:
     """기자 바이라인+이메일, "입력/수정" 날짜배너, "구글 검색 선호 출처로 추가", 공유하기
     위젯(카카오톡/페이스북/...), 기사 내비게이션("이전/다음 기사보기"), 사진 캡션("[사진: ...]"),
@@ -228,7 +277,18 @@ def strip_boilerplate_lines(text: str) -> str:
 
     2026-09-17: 한 줄씩 보는 필터(정규식/토큰비율)를 다 적용한 뒤, 마지막으로
     _strip_menu_runs()로 "짧은 줄이 길게 연속되는" 구조적 잡음(YTN처럼 메뉴 항목이 한 줄에
-    하나씩 나열되는 경우)까지 한 번 더 걸러냄."""
+    하나씩 나열되는 경우)까지 한 번 더 걸러냄.
+
+    2026-09-17 추가: 맨 마지막에 _reflow_fragmented_lines()로 인라인 태그 때문에 쪼개진
+    문장을 복구함(WIPO 등 영어 policy 페이지에서 확인). 주의 — reflow를 맨 앞에서 하면
+    안 됨: 게시판 라벨("제목"/"담당부서" 등)이나 메뉴 항목처럼 문장부호 없이 끝나는 잡음
+    줄들이 아직 살아있는 상태에서 reflow부터 돌리면, 그 잡음 줄들이 바로 다음 줄(실제 값/
+    본문)에 통째로 붙어버려서 한 줄 단위 필터(_BOARD_FIELD_LABEL_RE 등)와 구조적 필터
+    (_strip_menu_runs — "짧은 줄 8개 이상 연속" 판정도 병합되면서 깨짐)가 둘 다 무력화됨.
+    실제로 한국저작권위원회 샘플로 이 순서 버그가 재현됨 — 대메뉴 블록 전체와 "제목"/
+    "담당부서" 라벨이 안 지워지고 본문에 섞여 들어감. 그래서 순서를 "줄 단위 필터 →
+    구조적 메뉴런 필터 → reflow"로 고정: 잡음이 아직 낱줄로 살아있을 때 먼저 걷어내고,
+    남은 진짜 문장만 마지막에 이어붙임."""
     kept = []
     for line in text.split("\n"):
         stripped = line.strip()
@@ -241,4 +301,4 @@ def strip_boilerplate_lines(text: str) -> str:
             continue
         kept.append(line)
     kept = _strip_menu_runs(kept)
-    return "\n".join(kept)
+    return _reflow_fragmented_lines("\n".join(kept))
