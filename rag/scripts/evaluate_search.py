@@ -58,7 +58,6 @@ TEST_QUERIES: dict[str, list[str]] = {
 }
 
 TOP_K = 5
-SNIPPET_LEN = 1000  # 2026-09-16: 150 -> 1000 (청크가 600단어로 커져서 150자론 문장 중간에 끊겨 판단이 안 됨)
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "eval_results"
 
 
@@ -69,22 +68,21 @@ def _label_result(i: int, ctx: dict, source: dict) -> dict:
     2026-09-16: 라벨만 반환하던 걸 청크별 레코드로 바꿈 — 결과 JSON을 나중에 다시 열어봤을 때
     "5개 중 3번째가 0이었다"가 아니라 "이 chunk_id가 관련없다고 판정됐다"를 바로 알 수 있게 함.
 
-    청크가 600단어 단위라 SNIPPET_LEN(1000자)도 넘는 경우가 있음 — 그럴 땐 끝에 [이하 생략]
-    표시로 잘렸다는 걸 명확히 알려줌(예전처럼 "..."만 붙이면 문장이 중간에 끊긴 건지 실제로
-    더 있는 건지 구분이 안 됐음). 콘솔 폭에 맞게 textwrap으로 줄바꿈도 같이 해줌."""
+    2026-09-17: SNIPPET_LEN(글자수) 기준 추가 절단을 없앰 — ctx["content"]는 이미 chunks.content
+    (chunker.py의 600단어 슬라이딩 윈도우) 그 자체라 이미 "청크 단위"로 경계가 정해진 텍스트인데,
+    그 위에 또 1000자로 잘라서 보여주면 실제 검색에 쓰인 내용과 화면에 보이는 내용이 달라져서
+    판단이 왜곡됨(예: 청크 앞부분이 사이트 잡음이고 실제 관련 내용은 뒷부분에 있는데 앞부분만
+    보고 판단하게 되는 경우). 청크 하나는 원래도 화면에 다 못 띄울 만큼 길지 않으므로(문서
+    전체가 아니라 그 문서의 한 조각) 전체를 그대로 보여줌 — 콘솔 폭에 맞게 textwrap만 적용."""
     raw = ctx["content"].replace("\n", " ").strip()
-    truncated = len(raw) > SNIPPET_LEN
-    snippet = raw[:SNIPPET_LEN]
 
     print(f"\n  [{i}] score={ctx['score']:.4f}")
     print(f"      제목: {source.get('title', '(제목 없음)')}")
     print(f"      출처: {source.get('url', '-')}")
     print(f"      카테고리: {source.get('category', '-')}")
-    print("      내용:")
-    wrapped = textwrap.fill(snippet, width=90, initial_indent="        ", subsequent_indent="        ")
+    print(f"      내용 ({len(raw)}자, 청크 전체):")
+    wrapped = textwrap.fill(raw, width=90, initial_indent="        ", subsequent_indent="        ")
     print(wrapped)
-    if truncated:
-        print(f"        [이하 생략 — 전체 {len(raw)}자 중 {SNIPPET_LEN}자까지만 표시]")
 
     while True:
         answer = input("      이 결과가 쿼리와 관련 있나요? (y/n/s=건너뛰기): ").strip().lower()
