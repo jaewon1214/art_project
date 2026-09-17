@@ -29,7 +29,16 @@ COLLECTORS = [news_collector, official_collector, policy_collector, paper_collec
 def run_collector(module) -> dict:
     """수집기 모듈 1개(collect() -> list[dict] 규약)를 돌려서 전부 ingest_document()로 밀어넣음."""
     name = module.__name__.rsplit(".", 1)[-1]
-    stats = {"collected": 0, "inserted": 0, "duplicate": 0, "near_duplicate": 0, "irrelevant": 0, "failed": 0}
+    stats = {
+        "collected": 0,
+        "inserted": 0,
+        "duplicate": 0,
+        "near_duplicate": 0,
+        "irrelevant": 0,
+        "failed": 0,
+        "embedding_failed": 0,  # 2026-09-16: 저장은 됐지만(inserted) embedding만 실패한 문서 수 —
+                                 # inserted에도 같이 잡히니 "inserted 중 몇 건은 재임베딩 필요"로 읽을 것.
+    }
 
     try:
         docs = module.collect()
@@ -51,6 +60,8 @@ def run_collector(module) -> dict:
         status = result["status"]
         if status == "inserted":
             stats["inserted"] += 1
+            if result.get("embedding_failed"):
+                stats["embedding_failed"] += 1
         elif status == "duplicate":
             stats["duplicate"] += 1
         elif status == "near_duplicate":
@@ -91,7 +102,15 @@ def run_case_only() -> dict:
 
 def run_all() -> dict:
     """news + policy + official 전부 — 원본자료(policy/official)는 보통 최초 1회 수동 실행용."""
-    total = {"collected": 0, "inserted": 0, "duplicate": 0, "near_duplicate": 0, "irrelevant": 0, "failed": 0}
+    total = {
+        "collected": 0,
+        "inserted": 0,
+        "duplicate": 0,
+        "near_duplicate": 0,
+        "irrelevant": 0,
+        "failed": 0,
+        "embedding_failed": 0,
+    }
     for module in COLLECTORS:
         stats = run_collector(module)
         for k in total:
