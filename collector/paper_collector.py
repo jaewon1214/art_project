@@ -19,18 +19,74 @@ egress allowlist에 없으면 막힐 수 있음. 일반 PC/서버 환경에서�
   (발급되면 .env에 SEMANTIC_SCHOLAR_API_KEY로 넣고 헤더에 실어서 rate limit 완화).
 - arXiv에 없는 저널/학회 논문까지 커버하고 인용수(citationCount)도 같이 줌.
 - arXiv랑 겹치는 논문은 externalIds.ArXiv 값으로 걸러서 중복 저장 방지.
+
+[OpenAlex] (2026-09-16 추가)
+공식 문서: https://docs.openalex.org/
+- 키 불필요, 완전 무료. 예전 Microsoft Academic Graph를 이어받은 오픈 학술 그래프로,
+  arXiv/Semantic Scholar 둘 다 안 잡는 저널·학회 논문까지 커버 범위가 훨씬 넓음. Semantic
+  Scholar가 공유 풀이라 429(rate limit)로 쿼리가 통째로 날아가는 일이 잦았던 것과 달리,
+  OpenAlex는 기본 풀(초당 10회)만으로도 이 프로젝트 요청량(8쿼리 x 최대 2페이지)엔 충분히
+  여유로움 — Semantic Scholar가 막히는 날의 보완재 역할도 함.
+- .env에 OPENALEX_MAILTO=<이메일>을 넣으면 "polite pool"로 승격돼 더 넉넉한 한도를 받음
+  (선택사항 — 없어도 기본 풀로 정상 동작).
+- abstract는 원문이 아니라 abstract_inverted_index(단어->위치 인덱스) 형태로 옴 —
+  _reconstruct_abstract()로 원래 문장 순서로 복원해서 씀. 이 필드가 아예 없는(초록 비공개)
+  논문은 content가 없어서 스킵.
+- DOI가 "10.48550/arXiv.XXXX" 형태면 arXiv 프리프린트를 OpenAlex가 다시 색인한 것 —
+  seen_arxiv_ids로 걸러서 중복 저장 방지(Semantic Scholar와 동일한 패턴).
+
+[OpenAlex 한국 논문] (2026-09-17 추가)
+- KCI Open API는 인증키 발급이 수동 심사라 오늘 바로 못 씀(신청은 해둔 상태, 승인 대기 중).
+  그 사이 공백을 메우려고, 이미 연결돼 있던 OpenAlex에 filter=language:ko를 추가해서
+  "한국어로 작성된" 논문만 별도로 검색하는 패스를 만듦 — 키/승인 필요 없이 오늘 바로 동작.
+  단, OpenAlex는 Crossref/DOI 기반 색인이라 DOI 없는 국내 학회지(특히 KCI 전용 등재지)는
+  안 잡힐 수 있음 — 커버리지가 KCI보다 좁을 걸로 예상되지만, 승인 기다리는 동안의 임시
+  보완재로는 충분함. KCI 승인되면 그쪽이 주력, 이건 계속 병행(중복은 겹치는 DOI가 거의
+  없어서 사실상 안 남).
+- 쿼리는 SEMANTIC_SCHOLAR_QUERIES와 같은 카테고리/의미를 한국어 키워드로 옮긴 것.
+- 이 패스로 수집된 문서는 language="ko"로 태그 — ingest.py가 document_type=="paper"인
+  문서는 애초에 번역을 안 시키므로(원문 그대로 저장) 동작에 영향 없고, 메타데이터만
+  정확해짐(나중에 language 기준으로 필터링/집계할 때 필요).
 """
 from __future__ import annotations
 
+import os
+import re
 import time
 from datetime import date, datetime
 from urllib.parse import quote
 
 import feedparser  # pip install feedparser
 import requests  # pip install requests
+from dotenv import load_dotenv  # pip install python-dotenv
+
+# news_collector.py/case_collector.py와 동일한 이유로 직접 로드 — 이 모듈은 database.config를
+# 안 거치는 독립 모듈이라 .env가 자동으로는 안 읽힘.
+load_dotenv()
 
 ARXIV_API = "http://export.arxiv.org/api/query"
 SEMANTIC_SCHOLAR_API = "https://api.semanticscholar.org/graph/v1/paper/search"
+OPENALEX_API = "https://api.openalex.org/works"
+OPENALEX_MAILTO = os.environ.get("OPENALEX_MAILTO", "").strip()  # 선택 — 있으면 polite pool로 승격
+
+# 2026-09-16: "최신 데이터 위주로 수집" 전략 — 오래된 논문이 검색 결과 상위를 차지해서
+# 최신 논문이 덜 잡히는 문제를 줄이기 위해 연도 필터를 추가. arXiv/Semantic Scholar 둘 다
+# 이 연도 '이후' 논문만 수집(과거 논문을 아예 안 모으는 게 아니라, 최신 쪽으로 비중을 옮기는 것).
+# 필요하면 팀 논의로 조정할 것.
+PAPER_YEAR_FROM = 2023
+
+# 2026-09-16: arXiv RSS 피드 추가 — 검색 API(쿼리+연도필터)는 "그 시점까지 쌓인 것 중 검색"이라
+# 매번 똑같은 과거 논문이 잡힐 수 있는데, RSS는 그 카테고리에 "그날 새로 올라온" 논문만 나옴.
+# 검색어 필터가 없어서 카테고리 전체가 다 오니까(대부분 무관한 오디오처리 논문), LLM 관련성판정
+# 호출 비용을 아끼려고 최소한의 키워드로 1차 거름.
+ARXIV_RSS_BASE = "https://rss.arxiv.org/rss"
+ARXIV_RSS_CATEGORIES = ["cs.SD", "eess.AS"]
+_RSS_KEYWORD_RE = re.compile(
+    r"music|song|singing|singer|compos|melody|lyric|"
+    r"voice clon|voice conversion|speaker anonymiz|synthetic voice|"
+    r"copyright|generative music",
+    re.IGNORECASE,
+)
 
 # 주제(생성형 AI와 음악 창작)의 4개 하위쟁점별 검색 쿼리.
 # abs: = 초록(abstract) 안에서 검색. 필요하면 팀 논의로 쿼리 문구를 더 좁히거나 넓힐 것.
@@ -76,6 +132,28 @@ SEMANTIC_SCHOLAR_QUERIES: dict[str, list[str]] = {
     ],
 }
 
+# 2026-09-17 추가: OpenAlex 한국어 논문(language=ko) 전용 패스에 쓰는 쿼리 — 위
+# SEMANTIC_SCHOLAR_QUERIES와 같은 카테고리/의도를 한국어 키워드로 옮긴 것. 모듈 docstring
+# [OpenAlex 한국 논문] 항목 참고.
+OPENALEX_KOREAN_QUERIES: dict[str, list[str]] = {
+    "저작권": [
+        "생성형 AI 음악 저작권",
+        "AI 음악 학습데이터 저작권 라이선스",
+    ],
+    "창작자성": [
+        "AI 음악 창작 저작자성",
+        "인간과 AI 공동창작 음악",
+    ],
+    "음성복제": [
+        "AI 보이스 클로닝 음성권",
+        "목소리 무단 학습 음성복제",
+    ],
+    "AI작곡": [
+        "텍스트 기반 AI 작곡",
+        "생성형 AI 작곡 서비스",
+    ],
+}
+
 # 보수적으로 조정 — 처음엔 200/300까지 잡았다가, rate limit 리스크/비용 안전마진을 위해
 # 한 단계 낮춤. 그래도 원래(30/20)보다는 넉넉해서 수집량은 여전히 늘어남.
 MAX_RESULTS_PER_QUERY = 100  # 200 -> 100
@@ -87,13 +165,27 @@ SEMANTIC_SCHOLAR_INTERVAL_SEC = 4  # 3 -> 4, 안전마진 더 둠
 SEMANTIC_SCHOLAR_MAX_RETRIES = 3
 SEMANTIC_SCHOLAR_RETRY_BACKOFF_SEC = 5  # 429 맞으면 5, 10, 20초... 늘려가며 재시도
 
+OPENALEX_MAX_RESULTS = 100  # per-page 최대치
+OPENALEX_MAX_PAGES = 2  # 쿼리당 최대 200건 — Semantic Scholar와 동일한 상한
+OPENALEX_INTERVAL_SEC = 1  # 기본 풀 기준(초당 10회)으로도 충분히 여유있는 간격
+
 
 def _fetch_query(query: str) -> list:
+    # PAPER_YEAR_FROM 이후로 제출된 논문만 — arXiv 날짜 범위 문법은 YYYYMMDDHHMMSS 14자리.
+    date_filter = f"submittedDate:[{PAPER_YEAR_FROM}0101000000 TO 99991231235959]"
+    full_query = f"({query}) AND {date_filter}"
     url = (
-        f"{ARXIV_API}?search_query={quote(query)}"
+        f"{ARXIV_API}?search_query={quote(full_query)}"
         f"&start=0&max_results={MAX_RESULTS_PER_QUERY}"
         f"&sortBy=submittedDate&sortOrder=descending"
     )
+    parsed = feedparser.parse(url)
+    return parsed.entries
+
+
+def _fetch_arxiv_rss(feed_category: str) -> list:
+    """카테고리 전체의 "오늘/최근 새로 제출된" 논문 목록 — 검색어 없이 그대로 옴."""
+    url = f"{ARXIV_RSS_BASE}/{feed_category}"
     parsed = feedparser.parse(url)
     return parsed.entries
 
@@ -111,6 +203,9 @@ def _fetch_semantic_scholar(query: str, offset: int = 0) -> list[dict]:
                     "offset": offset,
                     "limit": SEMANTIC_SCHOLAR_MAX_RESULTS,
                     "fields": "title,abstract,authors,year,publicationDate,externalIds,url",
+                    # "2023-" 형태 = PAPER_YEAR_FROM 연도부터 최신까지. 이 엔드포인트는 sort
+                    # 파라미터는 안 되지만(정렬은 /paper/search/bulk 전용) year 필터는 지원됨.
+                    "year": f"{PAPER_YEAR_FROM}-",
                 },
                 timeout=10,
                 headers={"User-Agent": "Mozilla/5.0"},
@@ -143,11 +238,116 @@ def _fetch_semantic_scholar_paginated(query: str) -> list[dict]:
     return all_papers
 
 
+def _fetch_openalex(query: str, page: int, language: str | None = None) -> list[dict]:
+    """language를 주면(예: "ko") OpenAlex의 language 필터를 같이 걸어서 그 언어로 작성된
+    논문만 받음 — 2026-09-17 KCI 승인 대기 중 임시 대체용으로 추가 (모듈 docstring
+    [OpenAlex 한국 논문] 참고). 필터는 콤마로 이어붙이면 AND 조건이 됨."""
+    filters = [f"from_publication_date:{PAPER_YEAR_FROM}-01-01"]
+    if language:
+        filters.append(f"language:{language}")
+    params = {
+        "search": query,
+        "filter": ",".join(filters),
+        "sort": "publication_date:desc",
+        "per-page": OPENALEX_MAX_RESULTS,
+        "page": page,
+    }
+    if OPENALEX_MAILTO:
+        params["mailto"] = OPENALEX_MAILTO  # polite pool 승격용(선택)
+    resp = requests.get(OPENALEX_API, params=params, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+    resp.raise_for_status()
+    return resp.json().get("results", [])
+
+
+def _fetch_openalex_paginated(query: str, language: str | None = None) -> list[dict]:
+    """OPENALEX_MAX_PAGES까지 page 파라미터로 페이지네이션 — Semantic Scholar와 동일한 패턴."""
+    all_works: list[dict] = []
+    for page in range(1, OPENALEX_MAX_PAGES + 1):
+        works = _fetch_openalex(query, page, language=language)
+        all_works.extend(works)
+        if len(works) < OPENALEX_MAX_RESULTS:
+            break
+        if page < OPENALEX_MAX_PAGES:
+            time.sleep(OPENALEX_INTERVAL_SEC)
+    return all_works
+
+
 def _arxiv_short_id(raw_id: str) -> str:
     """arXiv entry id('http://arxiv.org/abs/2309.01234v1')에서 순수 ID('2309.01234')만 뽑음.
     Semantic Scholar의 externalIds.ArXiv 값과 비교해서 중복을 걸러내는 데 씀."""
     tail = raw_id.rstrip("/").rsplit("/", 1)[-1]
     return tail.split("v")[0] if "v" in tail else tail
+
+
+_OPENALEX_ARXIV_DOI_RE = re.compile(r"48550/arxiv\.([a-z0-9.]+)", re.IGNORECASE)
+
+
+def _reconstruct_abstract(inverted_index: dict | None) -> str:
+    """OpenAlex는 저작권 문제로 초록 원문을 안 주고 abstract_inverted_index(단어 -> 등장 위치
+    리스트)만 줌 — 위치 기준으로 정렬해서 원래 문장으로 복원. 이 필드가 없으면(초록 비공개
+    논문) 빈 문자열 반환 — 호출부에서 content 없는 항목으로 스킵됨."""
+    if not inverted_index:
+        return ""
+    positions: list[tuple[int, str]] = []
+    for word, idxs in inverted_index.items():
+        for idx in idxs:
+            positions.append((idx, word))
+    positions.sort(key=lambda p: p[0])
+    return " ".join(word for _, word in positions)
+
+
+def _openalex_arxiv_id(doi: str | None) -> str | None:
+    """OpenAlex work의 doi가 "https://doi.org/10.48550/arXiv.2309.01234" 형태면 arXiv
+    프리프린트를 다시 색인한 것 — seen_arxiv_ids와 비교할 순수 arXiv ID만 뽑아서 반환."""
+    if not doi:
+        return None
+    m = _OPENALEX_ARXIV_DOI_RE.search(doi)
+    return m.group(1) if m else None
+
+
+def _openalex_work_to_row(work: dict, category: str, seen_arxiv_ids: set[str], language: str) -> dict | None:
+    """OpenAlex work 1건 -> collect() 결과 row. 초록 없음/arXiv 중복이면 None.
+    영어 패스와 한국어 패스(language=ko) 둘 다 이 함수를 공유 — 2026-09-17 한국어 패스 추가
+    하면서 중복 로직을 안 늘리려고 뽑아냄."""
+    abstract = _reconstruct_abstract(work.get("abstract_inverted_index"))
+    if not abstract:
+        return None  # 초록 비공개 항목은 스킵 (content 필수)
+
+    arxiv_id = _openalex_arxiv_id(work.get("doi"))
+    if arxiv_id and arxiv_id in seen_arxiv_ids:
+        return None  # arXiv에서 이미 수집한 프리프린트와 중복
+
+    published_at = date.today()
+    pub_date = work.get("publication_date")
+    if pub_date:
+        try:
+            published_at = datetime.strptime(pub_date, "%Y-%m-%d").date()
+        except ValueError:
+            pass
+    elif work.get("publication_year"):
+        published_at = date(int(work["publication_year"]), 1, 1)
+
+    authors = (
+        ", ".join(
+            (a.get("author") or {}).get("display_name", "")
+            for a in work.get("authorships", [])
+        ).strip(", ")
+        or None
+    )
+
+    url = work.get("doi") or work.get("id") or ""
+
+    return {
+        "title": (work.get("title") or work.get("display_name") or "").strip(),
+        "content": abstract,
+        "url": url,
+        "author": authors,
+        "category": category,
+        "document_type": "paper",
+        "published_at": published_at,
+        "language": language,
+        "source_name": "OpenAlex",
+    }
 
 
 def collect() -> list[dict]:
@@ -195,6 +395,59 @@ def collect() -> list[dict]:
 
             time.sleep(REQUEST_INTERVAL_SEC)
 
+    # ---------------- arXiv RSS (검색어 없이, 카테고리 전체 최신 논문) ----------------
+    for feed_category in ARXIV_RSS_CATEGORIES:
+        try:
+            entries = _fetch_arxiv_rss(feed_category)
+        except Exception as e:  # noqa: BLE001
+            print(f"[paper_collector] arXiv RSS '{feed_category}' 조회 실패: {e}")
+            continue
+
+        for entry in entries:
+            link = entry.get("link", "")
+            if not link:
+                continue
+            short_id = _arxiv_short_id(link)
+            if short_id in seen_arxiv_ids:
+                continue
+
+            title = entry.get("title", "").replace("\n", " ").strip()
+            abstract = entry.get("summary", "").replace("\n", " ").strip()
+            # description이 "arXiv:2609.12432v1 Announce Type: new  Abstract: ..." 형태라
+            # 실제 초록만 남김(패턴이 안 맞으면 원문 그대로 둠 — 손실보다 원문 보존이 낫다).
+            if "Abstract:" in abstract:
+                abstract = abstract.split("Abstract:", 1)[-1].strip()
+
+            if not _RSS_KEYWORD_RE.search(f"{title} {abstract}"):
+                continue  # 주제 키워드조차 없으면 LLM 호출(비용) 없이 바로 스킵
+
+            seen_arxiv_ids.add(short_id)
+
+            published_at = date.today()
+            if entry.get("published_parsed"):
+                try:
+                    published_at = date(*entry.published_parsed[:3])
+                except (TypeError, ValueError):
+                    pass
+
+            authors = entry.get("author") or None
+
+            results.append(
+                {
+                    "title": title,
+                    "content": abstract,
+                    "url": link,
+                    "author": authors,
+                    "category": "AI작곡",  # 1차 힌트 — LLM 관련성판정이 실제 내용 기준으로 덮어씀
+                    "document_type": "paper",
+                    "published_at": published_at,
+                    "language": "en",
+                    "source_name": "arXiv",
+                }
+            )
+
+        time.sleep(REQUEST_INTERVAL_SEC)
+
     # ---------------- Semantic Scholar ----------------
     for category, queries in SEMANTIC_SCHOLAR_QUERIES.items():
         for query in queries:
@@ -241,6 +494,43 @@ def collect() -> list[dict]:
 
             time.sleep(SEMANTIC_SCHOLAR_INTERVAL_SEC)
 
+    # ---------------- OpenAlex (영어/기본) ----------------
+    # 쿼리 세트는 Semantic Scholar와 동일하게 재사용 — 둘 다 필드검색 문법(arXiv의 abs: 같은)
+    # 없이 일반 키워드로 검색하는 API라 같은 쿼리 문구를 그대로 쓸 수 있음.
+    for category, queries in SEMANTIC_SCHOLAR_QUERIES.items():
+        for query in queries:
+            try:
+                works = _fetch_openalex_paginated(query)
+            except Exception as e:  # noqa: BLE001 — 한 쿼리 실패해도 나머지는 계속 진행
+                print(f"[paper_collector] OpenAlex '{category}' 쿼리 실패: {e}")
+                continue
+
+            for work in works:
+                row = _openalex_work_to_row(work, category, seen_arxiv_ids, language="en")
+                if row:
+                    results.append(row)
+
+            time.sleep(OPENALEX_INTERVAL_SEC)
+
+    # ---------------- OpenAlex (한국어 논문, language=ko) ----------------
+    # 2026-09-17 추가: KCI Open API 인증키 승인 대기 중 — 그동안 국내 논문 공백을 메우는 임시
+    # 대체 경로. 모듈 docstring [OpenAlex 한국 논문] 참고. KCI 승인되면 그쪽이 주력이 되고
+    # 이 패스는 계속 병행(겹치는 DOI가 거의 없어 중복 걱정 없음).
+    for category, queries in OPENALEX_KOREAN_QUERIES.items():
+        for query in queries:
+            try:
+                works = _fetch_openalex_paginated(query, language="ko")
+            except Exception as e:  # noqa: BLE001
+                print(f"[paper_collector] OpenAlex(한국어) '{category}' 쿼리 실패: {e}")
+                continue
+
+            for work in works:
+                row = _openalex_work_to_row(work, category, seen_arxiv_ids, language="ko")
+                if row:
+                    results.append(row)
+
+            time.sleep(OPENALEX_INTERVAL_SEC)
+
     return results
 
 
@@ -248,4 +538,4 @@ if __name__ == "__main__":
     docs = collect()
     print(f"{len(docs)}건 수집")
     for d in docs[:10]:
-        print(f"- [{d['source_name']}/{d['category']}] {d['title']} ({d['url']})")
+        print(f"- [{d['source_name']}/{d['category']}/{d['language']}] {d['title']} ({d['url']})")
