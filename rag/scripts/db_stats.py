@@ -84,6 +84,24 @@ def main() -> None:
             else:
                 print("없음 — 전부 chunk까지 생성됨")
 
+            print("\n=== embedding 없는 chunk (임베딩 실패로 박제됐을 가능성) ===")
+            cur.execute(
+                """
+                SELECT d.document_type, count(*)
+                FROM chunks c
+                JOIN documents d ON d.id = c.document_id
+                WHERE c.embedding IS NULL
+                GROUP BY d.document_type
+                ORDER BY count(*) DESC;
+                """
+            )
+            rows = cur.fetchall()
+            if rows:
+                _print_table(["document_type", "embedding 없는 chunk 수"], rows)
+                print("  -> python -m rag.scripts.backfill_missing_embeddings 로 재계산 가능")
+            else:
+                print("없음 — 전부 embedding까지 채워짐")
+
             print(f"\n=== published_at 기준 과거/최신 분포 (기준선: {KNOWLEDGE_CUTOFF}, LLM 학습 컷오프 대략값) ===")
             cur.execute(
                 """

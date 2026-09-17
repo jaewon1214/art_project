@@ -130,8 +130,12 @@ def store_extraction(conn, document_id, doc_meta: dict, extraction: dict) -> tup
     return entities_for_graph, relations_for_graph
 
 
-def extract_and_store(conn, document_id, doc_meta: dict, text: str) -> tuple[list[dict], list[dict]]:
+def extract_and_store(
+    conn, document_id, doc_meta: dict, text: str, document_type: str | None = None
+) -> tuple[list[dict], list[dict]]:
     """편의 함수: LLM 호출(analyze_document) + 저장(store_extraction)을 한 번에.
-    단독 테스트/스크립트용 — pipeline/ingest.py는 관련성 게이팅 때문에 두 단계를 직접 나눠서 씀."""
-    extraction = extractor.analyze_document(text)
+    단독 테스트/스크립트용 — pipeline/ingest.py는 관련성 게이팅 때문에 두 단계를 직접 나눠서 씀.
+    document_type: case/policy면 analyze_document()가 더 긴 스니펫을 씀(extractor.py 참고) —
+    모르면 생략해도 됨(기존 동작과 동일)."""
+    extraction = extractor.analyze_document(text, document_type=document_type)
     return store_extraction(conn, document_id, doc_meta, extraction)

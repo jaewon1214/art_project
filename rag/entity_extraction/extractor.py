@@ -33,8 +33,17 @@ from rag.config import LLM_API_KEY, LLM_MODEL, LLM_PROVIDER
 from database.neo4j.known_types import CATEGORIES, ENTITY_TYPES, RELATION_TYPES
 
 # 문서가 너무 길면 토큰 비용/처리 시간이 커지니 앞부분만 사용.
-# 뉴스/정책 기사는 보통 도입부에 핵심 개체가 다 나오므로 충분함.
+# 뉴스/논문 초록은 보통 도입부에 핵심 개체가 다 나오므로 6000자면 충분함.
 MAX_CHARS = 6000
+
+# 2026-09-16: case/policy는 6000자로 자르면 위험함을 발견 — case_collector.py는 "판시사항 +
+# 판결요지 + 판례내용"을 이어붙여서 저장하는데, 실제 AI/음악 관련 언급이 판례내용 뒷부분에만
+# 나오는 경우 앞 6000자(판시사항+판결요지 정도)만 보고 is_relevant=False로 잘못 걸러낼 수 있음.
+# policy도 저작권위원회 공지처럼 긴 문서가 있어 동일한 위험. case/policy 자체가 원래도 데이터가
+# 희소한 타입이라(case는 LAW_API_OC 없이는 0건) 이 컷오프 때문에 한 번 더 깎이는 걸 막기 위해
+# 더 넉넉하게 줌 — 두 타입 다 수집량이 적어서 토큰 비용 증가분도 무시할 수준.
+MAX_CHARS_LONG = 15000
+_LONG_DOCUMENT_TYPES = {"case", "policy"}
 
 _SYSTEM_PROMPT = """너는 "생성형 AI와 음악 창작"(저작권/창작자성/음성복제/AI작곡) 연구 프로젝트의
 문서 수집 파이프라인에서 관련성 판정/카테고리 분류/엔티티·관계 추출을 한 번에 담당하는 도구다.
@@ -170,8 +179,13 @@ def _parse_response(raw: str) -> dict:
     }
 
 
-def analyze_document(text: str) -> dict:
+def analyze_document(text: str, document_type: str | None = None) -> dict:
     """text(문서 본문) -> {"is_relevant", "relevance_reason", "entities", "relations"}.
+
+    document_type: "case"/"policy"면 MAX_CHARS_LONG(15000자)까지, 그 외(news/paper/...)는
+    기존 MAX_CHARS(6000자)까지만 사용 — 위 _LONG_DOCUMENT_TYPES 주석 참고. 생략하면(None)
+    기존 동작(6000자)과 동일 — entity_extraction/sync.extract_and_store()의 단독 테스트
+    호출처럼 document_type을 모르는 경우를 위한 하위호환.
 
     LLM_PROVIDER가 .env에 없으면 NotImplementedError — pipeline/ingest.py는 이걸 보고
     관련성 판정/엔티티 추출 단계를 건너뛴다(수집한 문서는 그대로 신뢰하고 저장).
@@ -182,7 +196,8 @@ def analyze_document(text: str) -> dict:
             ".env(LLM_PROVIDER/LLM_MODEL/LLM_API_KEY)를 채우세요."
         )
 
-    snippet = text[:MAX_CHARS]
+    max_chars = MAX_CHARS_LONG if document_type in _LONG_DOCUMENT_TYPES else MAX_CHARS
+    snippet = text[:max_chars]
 
     if LLM_PROVIDER == "openai":
         raw = _call_openai(snippet)
