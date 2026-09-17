@@ -24,17 +24,29 @@ precision@k를 계산 — 데이터가 늘어날 때마다(또는 검색 로직�
 바꿈 — 어떤 청크가 관련없다고 판정됐는지 나중에 다시 열어봐도 바로 추적 가능하게 하기 위함
 (전엔 순서만 보고 어떤 청크였는지 역추적해야 했음). precision_at_k 계산 방식/의미는 그대로라
 이전 결과 파일과 precision 수치 비교는 계속 유효함.
+
+2026-09-17: 청크가 너무 길어서(600단어) 눈으로 훑기 힘들다는 피드백 -> "관련된 부분만
+보여달라"는 요청이 있었는데, 그건 순환논리가 됨(뭐가 관련있는지 사람이 판단하게 하려고
+만든 스크립트인데, 관련 부분을 미리 걸러 보여주면 그 판단을 스크립트가 먼저 해버리는 셈).
+게다가 벡터검색으로 잡힌 청크는 쿼리와 글자 하나 안 겹쳐도(패러프레이즈) 의미상 관련될 수
+있어서, 키워드 안 겹치는 부분을 무조건 숨기면 그런 청크가 통째로 안 보이게 될 위험도 있음.
+그래서 내용은 그대로 다 보여주되(전체 정보 보존), 쿼리와 형태소 토큰이 겹치는 문장 앞에만
+"▶" 표시를 달아서 눈이 먼저 갈 곳을 안내하는 절충안으로 구현(_mark_matching_sentences).
+표시가 하나도 없다고 "무관하다"는 뜻은 아님(특히 벡터검색으로만 잡힌 청크) — 참고용 하이라이트일
+뿐, 최종 판단은 여전히 사람이 전체 내용을 보고 함.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import textwrap
 import time
 from datetime import datetime
 from pathlib import Path
 
+from rag.preprocessing.korean_tokenize import tokenize_for_search
 from rag.retrieval.context_builder import search_context
 
 # 카테고리별 대표 쿼리 2개씩 — documents.category 값(저작권/창작자성/음성복제/AI작곡)과 1:1 대응.
@@ -60,8 +72,33 @@ TEST_QUERIES: dict[str, list[str]] = {
 TOP_K = 5
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "eval_results"
 
+# preprocessing/translate.py의 _SENTENCE_SPLIT_RE와 동일한 기준(마침표/물음표/느낌표 뒤 공백) —
+# 한국어 문장 종결어미(다/까/요 등)는 보통 그 뒤에 마침표가 붙어서 이 기준으로 충분히 갈라짐.
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+_MARK_PREFIX = "▶ "
 
-def _label_result(i: int, ctx: dict, source: dict) -> dict:
+
+def _mark_matching_sentences(text: str, query: str) -> list[tuple[bool, str]]:
+    """text를 문장 단위로 쪼개서, 각 문장이 query와 형태소 토큰을 하나라도 공유하면
+    (True, 문장) 아니면 (False, 문장)으로 표시. 검색에 실제 쓰인 형태소분석(korean_tokenize)과
+    동일한 기준으로 비교해야 "저작권을"(청크) vs "저작권"(쿼리) 같은 조사 차이로 놓치지 않음.
+
+    이건 참고용 하이라이트일 뿐 — 표시 안 된 문장을 숨기지 않고 그대로 다 보여주는 게 핵심
+    (위 모듈 docstring 2026-09-17 참고). query 토큰화 결과가 비어있으면(예: 전부 특수문자)
+    전부 표시 없음으로 반환 — 이 경우 화면엔 그냥 문장 구분만 있고 하이라이트는 안 뜸."""
+    query_tokens = set(tokenize_for_search(query).split())
+    sentences = [s for s in _SENTENCE_SPLIT_RE.split(text) if s.strip()]
+    if not query_tokens or not sentences:
+        return [(False, text)] if text.strip() else []
+
+    marked: list[tuple[bool, str]] = []
+    for sentence in sentences:
+        sentence_tokens = set(tokenize_for_search(sentence).split())
+        marked.append((bool(query_tokens & sentence_tokens), sentence))
+    return marked
+
+
+def _label_result(i: int, ctx: dict, source: dict, query: str) -> dict:
     """검색 결과(청크 하나)를 화면에 보여주고 사람한테 관련성(y/n)을 물어봐서, 그 청크를
     나중에도 추적할 수 있도록 chunk_id/document_id 등 메타데이터를 라벨과 함께 dict로 반환.
 
@@ -73,16 +110,28 @@ def _label_result(i: int, ctx: dict, source: dict) -> dict:
     그 위에 또 1000자로 잘라서 보여주면 실제 검색에 쓰인 내용과 화면에 보이는 내용이 달라져서
     판단이 왜곡됨(예: 청크 앞부분이 사이트 잡음이고 실제 관련 내용은 뒷부분에 있는데 앞부분만
     보고 판단하게 되는 경우). 청크 하나는 원래도 화면에 다 못 띄울 만큼 길지 않으므로(문서
-    전체가 아니라 그 문서의 한 조각) 전체를 그대로 보여줌 — 콘솔 폭에 맞게 textwrap만 적용."""
+    전체가 아니라 그 문서의 한 조각) 전체를 그대로 보여줌 — 콘솔 폭에 맞게 textwrap만 적용.
+
+    2026-09-17: 청크가 길 때(예: 2600자) 쿼리와 무관한 문장까지 다 읽어야 하는 문제를 논의한 끝에,
+    내용을 자르거나 요약하지 않고 "쿼리와 토큰이 겹치는 문장 앞에 ▶ 표시"만 추가하는 방식(옵션 3)
+    으로 결정함 — 자르기/요약은 판단 근거 자체를 조작하는 순환논리가 되지만, 표시는 실제 청크
+    내용을 그대로 유지한 채 훑어보기만 돕는 것이라 안전함."""
     raw = ctx["content"].replace("\n", " ").strip()
 
     print(f"\n  [{i}] score={ctx['score']:.4f}")
     print(f"      제목: {source.get('title', '(제목 없음)')}")
     print(f"      출처: {source.get('url', '-')}")
     print(f"      카테고리: {source.get('category', '-')}")
-    print(f"      내용 ({len(raw)}자, 청크 전체):")
-    wrapped = textwrap.fill(raw, width=90, initial_indent="        ", subsequent_indent="        ")
-    print(wrapped)
+    print(f"      내용 ({len(raw)}자, 청크 전체, ▶ = 쿼리와 겹치는 문장):")
+    for is_match, sentence in _mark_matching_sentences(raw, query):
+        prefix = _MARK_PREFIX if is_match else "        "
+        wrapped = textwrap.fill(
+            sentence.strip(),
+            width=90,
+            initial_indent=prefix,
+            subsequent_indent="        ",
+        )
+        print(wrapped)
 
     while True:
         answer = input("      이 결과가 쿼리와 관련 있나요? (y/n/s=건너뛰기): ").strip().lower()
@@ -138,7 +187,7 @@ def _evaluate_query(category: str, query: str) -> dict:
     chunk_results = []
     for i, ctx in enumerate(contexts[:TOP_K], start=1):
         src = sources.get(ctx["document_id"], {})
-        chunk_results.append(_label_result(i, ctx, src))
+        chunk_results.append(_label_result(i, ctx, src, query))
 
     scored = [c["label"] for c in chunk_results if c["label"] != -1]
     precision = sum(scored) / len(scored) if scored else None
