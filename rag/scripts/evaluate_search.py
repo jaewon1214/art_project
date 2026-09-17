@@ -24,6 +24,11 @@ precision@k를 계산 — 데이터가 늘어날 때마다(또는 검색 로직�
 바꿈 — 어떤 청크가 관련없다고 판정됐는지 나중에 다시 열어봐도 바로 추적 가능하게 하기 위함
 (전엔 순서만 보고 어떤 청크였는지 역추적해야 했음). precision_at_k 계산 방식/의미는 그대로라
 이전 결과 파일과 precision 수치 비교는 계속 유효함.
+
+2026-09-17: score를 관련도 %로도 같이 보여주게 함 — 자세한 계산 근거는 _RRF_MAX_SCORE
+정의부 주석 참고 (요약: RRF 점수는 0~1 정규화 값이 아니라서, vector+keyword+graph 3개
+검색 전부에서 1등일 때를 이론상 100%로 놓고 상대 환산한 값. 벡터 검색이 미설정이면
+100%에 못 닿을 수 있음 — 절대적인 "이 청크가 몇 % 확실하다"는 의미는 아니고 참고용).
 """
 from __future__ import annotations
 
@@ -36,6 +41,7 @@ from datetime import datetime
 from pathlib import Path
 
 from rag.retrieval.context_builder import search_context
+from rag.retrieval.hybrid_rrf import DEFAULT_K
 
 # 카테고리별 대표 쿼리 2개씩 — documents.category 값(저작권/창작자성/음성복제/AI작곡)과 1:1 대응.
 TEST_QUERIES: dict[str, list[str]] = {
@@ -60,6 +66,20 @@ TEST_QUERIES: dict[str, list[str]] = {
 TOP_K = 5
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "eval_results"
 
+# RRF(hybrid_rrf.py)로 합쳐진 score = sum(1/(k+rank))는 코사인 유사도 같은 0~1 정규화 값이
+# 아니라 순위 기반 점수라, 그 자체 숫자(예: 0.0492)는 사람이 "관련도"로 직관적으로 읽기
+# 어려움. vector+keyword+graph 3개 검색 전부에서 해당 청크가 1등(rank=1)일 때가 이론상
+# 만점이므로, 그 값을 100%로 놓고 상대 환산해서 보여줌 — "이론상 최고 점수 대비 몇 %인가".
+# 주의: 벡터 검색이 미설정이면(embedding provider 없음) 실제로는 keyword+graph 2개만
+# 참여하므로 아무리 관련성이 높아도 100%에는 못 닿을 수 있음. 절대적인 확신도가 아니라
+# "이 결과들 중 상대적으로 얼마나 강하게 매칭됐는지" 보는 참고용 지표.
+_RRF_NUM_SOURCES = 3  # context_builder.py가 합치는 검색 경로 수 (vector, keyword, graph)
+_RRF_MAX_SCORE = _RRF_NUM_SOURCES / (DEFAULT_K + 1)
+
+
+def _relevance_percent(score: float) -> float:
+    return min(100.0, score / _RRF_MAX_SCORE * 100)
+
 
 def _label_result(i: int, ctx: dict, source: dict) -> dict:
     """검색 결과(청크 하나)를 화면에 보여주고 사람한테 관련성(y/n)을 물어봐서, 그 청크를
@@ -73,10 +93,13 @@ def _label_result(i: int, ctx: dict, source: dict) -> dict:
     그 위에 또 1000자로 잘라서 보여주면 실제 검색에 쓰인 내용과 화면에 보이는 내용이 달라져서
     판단이 왜곡됨(예: 청크 앞부분이 사이트 잡음이고 실제 관련 내용은 뒷부분에 있는데 앞부분만
     보고 판단하게 되는 경우). 청크 하나는 원래도 화면에 다 못 띄울 만큼 길지 않으므로(문서
-    전체가 아니라 그 문서의 한 조각) 전체를 그대로 보여줌 — 콘솔 폭에 맞게 textwrap만 적용."""
-    raw = ctx["content"].replace("\n", " ").strip()
+    전체가 아니라 그 문서의 한 조각) 전체를 그대로 보여줌 — 콘솔 폭에 맞게 textwrap만 적용.
 
-    print(f"\n  [{i}] score={ctx['score']:.4f}")
+    2026-09-17: score 옆에 관련도 %를 같이 표시 — 계산 근거는 _RRF_MAX_SCORE 주석 참고."""
+    raw = ctx["content"].replace("\n", " ").strip()
+    percent = _relevance_percent(ctx["score"])
+
+    print(f"\n  [{i}] 관련도 {percent:.1f}% (raw score={ctx['score']:.4f})")
     print(f"      제목: {source.get('title', '(제목 없음)')}")
     print(f"      출처: {source.get('url', '-')}")
     print(f"      카테고리: {source.get('category', '-')}")
@@ -96,6 +119,7 @@ def _label_result(i: int, ctx: dict, source: dict) -> dict:
                 "url": source.get("url"),
                 "category": source.get("category"),
                 "score": ctx["score"],
+                "relevance_percent": round(percent, 1),
                 "label": label,
             }
         print("      y, n, s 중 하나로 입력해주세요.")
