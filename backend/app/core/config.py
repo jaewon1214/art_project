@@ -21,6 +21,7 @@ class Settings(BaseSettings):
 
     backend_use_mock_llm: bool = True
     backend_use_mock_rag: bool = True
+    backend_use_mock_transformer: bool = True
 
     model_config = SettingsConfigDict(
         env_file=ENV_FILE,
