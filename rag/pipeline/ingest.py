@@ -75,7 +75,7 @@ def ingest_document(raw_doc: dict, sync_graph: bool = True) -> dict:
         # "꼭 관련된 내용으로만 수집" 요건: is_relevant=False면 여기서 그냥 끝, DB에 아무것도 안 남음.
         extraction: dict | None = None
         if config.LLM_PROVIDER:
-            extraction = extractor.analyze_document(doc["content"])
+            extraction = extractor.analyze_document(doc["content"], document_type=doc["document_type"])
             if not extraction["is_relevant"]:
                 return {"status": "irrelevant", "reason": extraction.get("relevance_reason", "")}
             # collector가 넘긴 category(검색쿼리/사람이 미리 정한 값)는 1차 힌트일 뿐이고,
@@ -121,18 +121,39 @@ def ingest_document(raw_doc: dict, sync_graph: bool = True) -> dict:
                 chunk_id_by_index[row["chunk_index"]] = cur.fetchone()[0]
         conn.commit()
 
-        # 임베딩 — chunk 저장 직후, 같은 트랜잭션 밖에서 계산해서 UPDATE (API 호출은 커밋 밖에서)
+        # 임베딩 — chunk 저장 직후, 같은 트랜잭션 밖에서 계산해서 UPDATE (API 호출은 커밋 밖에서).
+        #
+        # 2026-09-16: 여기서 실패(재시도 소진 등)해도 예외를 밖으로 던지지 않도록 감쌈 — 예전엔
+        # 이 블록에서 터진 예외가 ingest_document() 밖으로 그대로 나가서: (1) 바로 위에서 이미
+        # commit된 documents/chunks는 그대로 DB에 남고, (2) content_hash가 이미 DB에 있으니 다음
+        # 수집 때 "완전중복"으로 처리돼 다시는 재시도되지 않고, (3) 아래 엔티티/관계 저장 블록까지
+        # 통째로 스킵되는 "반쪽 상태" 문서가 영구적으로 생겼음(embedding NULL -> 벡터검색 누락,
+        # entities도 없음). run_collectors.py는 이걸 "failed"로만 카운트해서 실제로 저장은 됐다는
+        # 사실도 로그에서 드러나지 않았음. 이제는 실패해도 계속 진행해서 엔티티 저장/Neo4j 동기화는
+        # 정상적으로 이어지고, 반환값의 embedding_failed로 이 사실을 호출부에 알림 — 재임베딩은
+        # rag/scripts/backfill_missing_embeddings.py(embedding IS NULL인 chunk를 찾아 재계산)로 처리.
+        embedding_failed = False
         if config.EMBEDDING_PROVIDER and chunk_rows:
-            vectors = embed_texts([row["content"] for row in chunk_rows])
-            with conn.cursor() as cur:
-                for row, vec in zip(chunk_rows, vectors):
-                    cur.execute(
-                        "UPDATE chunks SET embedding = %s::vector WHERE id = %s;",
-                        (embedding_to_pgvector_literal(vec), chunk_id_by_index[row["chunk_index"]]),
-                    )
-            conn.commit()
+            try:
+                vectors = embed_texts([row["content"] for row in chunk_rows])
+                with conn.cursor() as cur:
+                    for row, vec in zip(chunk_rows, vectors):
+                        cur.execute(
+                            "UPDATE chunks SET embedding = %s::vector WHERE id = %s;",
+                            (embedding_to_pgvector_literal(vec), chunk_id_by_index[row["chunk_index"]]),
+                        )
+                conn.commit()
+            except Exception as e:  # noqa: BLE001 — 아래 엔티티 저장까지 막으면 안 됨(위 주석 참고)
+                conn.rollback()
+                embedding_failed = True
+                print(
+                    f"[ingest] document_id={document_id} 임베딩 실패({e}) — chunks는 저장됐지만 "
+                    "embedding은 NULL로 남음. backfill_missing_embeddings.py로 나중에 재계산할 것."
+                )
 
-        # 엔티티/관계 저장 — 위에서 이미 계산해둔 extraction 재사용 (LLM 재호출 없음)
+        # 엔티티/관계 저장 — 위에서 이미 계산해둔 extraction 재사용 (LLM 재호출 없음).
+        # 임베딩 성공 여부와 무관하게 항상 시도 — 둘은 독립적인 단계라 하나가 실패해도 다른 하나는
+        # 정상 진행돼야 함.
         entities_for_graph: list[dict] = []
         relations_for_graph: list[dict] = []
         if extraction is not None:
@@ -144,7 +165,10 @@ def ingest_document(raw_doc: dict, sync_graph: bool = True) -> dict:
         load_entities(entities_for_graph)
         load_relations(relations_for_graph)
 
-    return {"status": "inserted", "document_id": document_id}
+    result = {"status": "inserted", "document_id": document_id}
+    if embedding_failed:
+        result["embedding_failed"] = True
+    return result
 
 
 if __name__ == "__main__":
