@@ -158,7 +158,8 @@ def test_generate_length_too_large() -> None:
 
     assert response.status_code == 422
 
-def test_generate_title_input_preserves_exact_title() -> None:
+
+def test_generate_with_title_preserves_exact_title() -> None:
     requested_title = (
         "소송에서 라이선스로: Suno·Udio와 메이저 레이블들의 "
         "합의가 생성형 음악 모델에 갖는 의미"
@@ -167,8 +168,11 @@ def test_generate_title_input_preserves_exact_title() -> None:
     response = client.post(
         "/api/v1/generate",
         json={
-            "input_type": "title",
-            "topic": requested_title,
+            "title": requested_title,
+            "topic": (
+                "Suno·Udio와 메이저 레이블 간 합의가 "
+                "생성형 음악 모델의 라이선스 구조에 미친 영향"
+            ),
         },
     )
 
@@ -176,11 +180,11 @@ def test_generate_title_input_preserves_exact_title() -> None:
     assert response.json()["title"] == requested_title
 
 
-def test_generate_invalid_input_type() -> None:
+def test_generate_title_too_short() -> None:
     response = client.post(
         "/api/v1/generate",
         json={
-            "input_type": "invalid",
+            "title": "AI",
             "topic": "생성형 AI 음악 저작권",
         },
     )

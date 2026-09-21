@@ -6,10 +6,12 @@ import PaperResult from "./components/PaperResult";
 import { generatePaper } from "./services/paperApi";
 
 function App() {
-  const [topic, setTopic] = useState(
+  const [title, setTitle] = useState(
     "생성형 AI와 음악 창작의 저작권 및 창작자성"
   );
-  const [inputType, setInputType] = useState("topic");
+  const [topic, setTopic] = useState(
+    "생성형 AI 음악 창작에서 저작권, 창작자성, 음성복제 및 AI 작곡과 관련된 주요 쟁점"
+  );
   const [paper, setPaper] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -20,10 +22,7 @@ function App() {
     setPaper(null);
 
     try {
-      const result = await generatePaper(
-        topic.trim(),
-        inputType
-      );
+      const result = await generatePaper(title.trim(), topic.trim());
       setPaper(result);
     } catch (err) {
       setError(
@@ -56,14 +55,14 @@ function App() {
           <aside className="control-panel">
             <div className="panel-heading">
               <h2>연구 입력</h2>
-              <p>논문 제목 또는 연구 주제를 선택해 입력해 주세요.</p>
+              <p>논문 제목과 연구 주제를 함께 입력해 주세요.</p>
             </div>
 
             <PaperForm
+              title={title}
+              setTitle={setTitle}
               topic={topic}
               setTopic={setTopic}
-              inputType={inputType}
-              setInputType={setInputType}
               onSubmit={handleGenerate}
               loading={loading}
             />
@@ -71,9 +70,9 @@ function App() {
             <div className="writing-guide">
               <h3>작성 안내</h3>
               <ol>
-                <li>제목 입력 시 해당 문구를 논문 제목으로 그대로 사용합니다.</li>
-                <li>주제 입력 시 내용을 분석해 적절한 논문 제목을 자동 구성합니다.</li>
-                <li>관련 근거와 참고문헌을 함께 확인합니다.</li>
+                <li>입력한 논문 제목은 최종 결과에 그대로 사용됩니다.</li>
+                <li>연구 주제는 근거 검색과 논문의 세부 내용 구성에 사용됩니다.</li>
+                <li>생성된 초안에서 관련 근거와 참고문헌을 함께 확인할 수 있습니다.</li>
               </ol>
             </div>
           </aside>
@@ -101,7 +100,7 @@ function App() {
                   <div className="document-line" />
                   <div className="document-line short" />
                 </div>
-                <h3>연구 주제를 입력해 주세요.</h3>
+                <h3>논문 제목과 연구 주제를 입력해 주세요.</h3>
                 <p>논문을 생성하면 이 영역에 초안과 참고문헌이 표시됩니다.</p>
               </div>
             )}
