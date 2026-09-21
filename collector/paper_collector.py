@@ -47,13 +47,51 @@ egress allowlist에 없으면 막힐 수 있음. 일반 PC/서버 환경에서�
 - 이 패스로 수집된 문서는 language="ko"로 태그 — ingest.py가 document_type=="paper"인
   문서는 애초에 번역을 안 시키므로(원문 그대로 저장) 동작에 영향 없고, 메타데이터만
   정확해짐(나중에 language 기준으로 필터링/집계할 때 필요).
+
+[KCI OAI-PMH] (2026-09-17 추가, 한국어 논문 커버리지 탐색 결과)
+한국어 논문 소스를 최대한 찾아본 결과:
+- KCI REST Open API(articleSearch, title 키워드 검색 지원 — 위 [OpenAlex 한국 논문] 항목에
+  적은 그 API): 승인 수동 심사라 아직 대기 중. 승인되면 이 파일에 REST 기반 검색 패스를
+  추가해서 이 OAI-PMH 패스와 병행/대체할 것(REST가 키워드 검색이 가능해서 더 정밀함).
+- DBpia/RISS: 둘 다 유료 구독 기반이거나 공개 검색 API를 제공하지 않음 — 제외.
+- KCI가 REST와 별개로 제공하는 OAI-PMH(Open Archives Initiative 표준 메타데이터 수확
+  프로토콜) 엔드포인트는 **인증키 없이 즉시 사용 가능**함을 2026-09-17 실제 호출로 확인함
+  (verb=Identify/ListSets/ListRecords 직접 테스트 — 정상 응답, KCI 저장소 확인됨).
+  다만 REST와 달리 제목/키워드로 "검색"하는 게 아니라 set(자료유형: ARTI=일반논문/
+  ARTI_CONF=학회논문/JOUR=학술지 — 주제별 구분은 없음) + 날짜범위(datestamp=등록·수정일
+  기준, 발행일 아님) 기준의 "대량 수확"만 지원함. 그래서 이 모듈은:
+    1. set=ARTI, 최근 KCI_OAI_LOOKBACK_DAYS일치 datestamp를 통째로 수확
+    2. dc:language가 "한국어"인 것만 남김(이 필드가 실제로 채워져 나오는 것까지 라이브로
+       확인함 — 예: 중국어/영어 논문도 섞여 나와서 이 필터가 꼭 필요함)
+    3. 제목+초록에 _KCI_KEYWORD_RE(음악/AI/저작권 등 최소 키워드)가 하나도 없으면 LLM
+       호출(비용) 없이 바로 스킵 — arXiv RSS 패스(위 [arXiv] 항목)와 동일한 이유/패턴.
+  이렇게 하면 REST API 키 승인을 기다리지 않고 바로 한국어 논문 수집이 가능함. 단점:
+  KCI 전체(모든 학문분야) 중 최근 등록분만 훑는 방식이라, REST의 정밀 키워드 검색보다
+  주제 적중률은 낮음(그래서 로컬 키워드 필터로 최대한 걸러냄) — 승인 나면 REST로 이관.
+  ⚠️ 이 OAI-PMH 파싱 코드는 KCI가 공개한 문서(OAI-PMH 2.0 표준 + oai_dc 포맷)와 실제 라이브
+  호출로 직접 검증한 응답 구조를 기준으로 작성했지만, 이 프로젝트 네트워크 환경(Cowork VM/
+  샌드박스)에서 open.kci.go.kr 자체가 막혀있어(egress allowlist) 로컬에서 실행 테스트는
+  못 해봄 — 서버 DB 접속 가능한 실제 PC에서 처음 실행할 때 결과(수집 건수/에러)를 꼭 확인할 것.
+
+[KCI REST] (2026-09-21 추가 — 키워드검색 인증키 승인 완료 후 실제 연동)
+articleSearch API(제목 키워드 정밀검색)를 사용하는 `_fetch_kci_rest()`를 추가하고 collect()의
+새 단계(6/7)로 연결함. OPENALEX_KOREAN_QUERIES(이미 카테고리별로 다듬어둔 한국어 검색어)를
+title 파라미터로 그대로 재사용 — 쿼리 세트를 따로 관리할 필요가 없게 함. 요청/응답 스펙(파라미터
+전체 목록, record 하나당 필드 경로 등)은 KCI_REST_BASE 바로 위 주석에 정리해둠.
+⚠️ OAI-PMH와 마찬가지로 이 파싱 코드도 이 네트워크 환경에서 open.kci.go.kr이 막혀있어 라이브
+응답으로 직접 실행 테스트는 못 함(공개된 파라미터/응답 구조 문서 기준으로만 작성) — 실제 PC에서
+처음 실행할 때 수집 건수·에러 로그를 꼭 확인할 것. 문제가 있으면(필드 경로가 실제 응답과
+다르다거나) `_kci_rest_record_to_row()`만 손보면 되고, OAI-PMH 경로는 그대로 병행 동작하니
+REST 쪽이 당장 안 되더라도 전체 수집이 막히지는 않음(collect()가 각 소스를 독립적으로
+try/except 처리).
 """
 from __future__ import annotations
 
 import os
 import re
 import time
-from datetime import date, datetime
+import xml.etree.ElementTree as ET
+from datetime import date, datetime, timedelta
 from urllib.parse import quote
 
 import feedparser  # pip install feedparser
@@ -101,6 +139,9 @@ QUERIES: dict[str, list[str]] = {
     "창작자성": [
         'abs:"AI music" AND (abs:authorship OR abs:"co-creation" OR abs:"computational creativity")',
         '(abs:"human-AI collaboration" OR abs:"AI-assisted composition") AND abs:music',
+        # 2026-09-19 추가: 창작자성 카테고리 보강 요청 — "저작권/저작자성" 자체를 정면으로
+        # 다루는 논문(음악에 국한되지 않는 일반 AI-저작권 authorship 논의도 포함)까지 넓힘.
+        '(abs:"human authorship" OR abs:"authorship requirement") AND (abs:copyright OR abs:"generative AI")',
     ],
     "음성복제": [
         'abs:"voice cloning" OR abs:"voice conversion" OR abs:"singing voice synthesis"',
@@ -121,6 +162,7 @@ SEMANTIC_SCHOLAR_QUERIES: dict[str, list[str]] = {
     "창작자성": [
         "AI music authorship computational creativity",
         "human-AI collaboration music composition",
+        "generative AI copyright authorship human creativity",
     ],
     "음성복제": [
         "voice cloning singing voice synthesis",
@@ -143,6 +185,7 @@ OPENALEX_KOREAN_QUERIES: dict[str, list[str]] = {
     "창작자성": [
         "AI 음악 창작 저작자성",
         "인간과 AI 공동창작 음악",
+        "AI 저작물 인간 창작 기여도 판단",
     ],
     "음성복제": [
         "AI 보이스 클로닝 음성권",
@@ -168,6 +211,55 @@ SEMANTIC_SCHOLAR_RETRY_BACKOFF_SEC = 5  # 429 맞으면 5, 10, 20초... 늘려�
 OPENALEX_MAX_RESULTS = 100  # per-page 최대치
 OPENALEX_MAX_PAGES = 2  # 쿼리당 최대 200건 — Semantic Scholar와 동일한 상한
 OPENALEX_INTERVAL_SEC = 1  # 기본 풀 기준(초당 10회)으로도 충분히 여유있는 간격
+
+# 2026-09-17 추가: KCI(한국학술지인용색인) OAI-PMH — 모듈 docstring [KCI OAI-PMH] 참고.
+KCI_OAI_BASE = "https://open.kci.go.kr/oai/request"
+
+# 2026-09-21: KCI REST API(키워드검색) 인증키 승인 완료 + 연동 함수 구현 완료. .env에
+# KCI_API_KEY가 있으면 collect()의 KCI REST 단계가 OPENALEX_KOREAN_QUERIES를 title 키워드로
+# 써서 실제 검색을 돌림(카테고리당 정밀 키워드 검색 — 아래 [KCI REST] 항목 참고). 키가 없으면
+# 이 단계는 조용히 스킵되고 OAI-PMH(무인증) 경로만 그대로 동작 — 기존 동작과 100% 호환.
+KCI_API_KEY = os.environ.get("KCI_API_KEY", "").strip()
+
+# [KCI REST] (2026-09-21 추가) — 키워드검색(articleSearch). OAI-PMH가 "최근 등록분을 통째로
+# 훑고 로컬 키워드로 거르는" 방식인 것과 반대로, 여기는 title 파라미터로 정밀 검색이 가능해서
+# 검색 폭은 좁지만(제목에 매치되는 것만) 후보 품질이 높음(=ingest.py LLM 호출 낭비가 적음).
+# 요청 파라미터: key(필수)/apiCode=articleSearch(필수)/title(필수, 검색어)/author/journal/
+# doi/institution/affiliation/keyword/abstract/dateFrom·dateTo(YYYYMM)/page/displayCount(최대
+# 100)/sortNm/sortDir. 응답은 XML, 루트 MetaData > outputData > record 반복 —
+# record/journalInfo(journal-name/pub-year/pub-mon 등), record/articleInfo(title-group/
+# article-title[lang=original|english], author-group/author, abstract-group/
+# abstract[lang=original|english], doi, url, article-id 속성). articleSearch는 keyword를
+# 검색 필터로는 받지만 결과에 키워드 자체는 안 실어줌 — 우리는 abstract만 쓰므로 무관.
+KCI_REST_BASE = "https://open.kci.go.kr/po/openapi/openApiSearch.kci"
+KCI_REST_DISPLAY_COUNT = 100  # 페이지당 최대치(API 상한)
+KCI_REST_MAX_PAGES = 3  # 쿼리당 최대 300건 안전 상한(OAI-PMH만큼 넓게 훑을 필요 없음 — 정밀검색이라)
+KCI_REST_INTERVAL_SEC = 2  # OAI-PMH와 동일하게 공식 rate limit 문서가 없어 보수적으로
+KCI_OAI_SET = "ARTI"  # 일반논문(학회논문/학술지 자체 메타는 별도 set — 우선 일반논문만)
+# 2026-09-19: "한국논문 더 많아야되는데" 요청으로 7 -> 180(6개월)로 확장. 원래 7일은 "매번
+# 조금씩 꾸준히" 쌓는 용도였는데, 그 방식으로는 KCI REST API(키워드검색) 승인 전까지 volume이
+# 너무 안 늘어남. 180일치를 한 번 크게 수확해서 그동안 쌓인 백로그를 메우는 쪽으로 바꿈.
+# 주의: SET=ARTI가 모든 학문분야를 다 포함해서(주제 필터가 API 레벨엔 없음) 기간을 넓히면
+# _KCI_KEYWORD_RE를 통과하는 후보 자체가 늘어나고, 그만큼 ingest.py의 LLM 관련성판정 호출도
+# 늘어남(=시간/비용 증가) — 한 번 크게 돌려보고 너무 오래 걸리면 이 값을 낮춰서 나눠 돌릴 것.
+# 재실행해도 이미 있는 문서는 dedupe로 스킵되니 겹치는 기간을 다시 돌려도 안전함.
+KCI_OAI_LOOKBACK_DAYS = 180  # datestamp(등록/수정일) 기준 최근 며칠치를 매 실행마다 수확할지
+KCI_OAI_MAX_PAGES = 80  # resumptionToken 페이지네이션 안전 상한(무한루프 방지) — 기간 늘어난 만큼 같이 올림
+KCI_OAI_INTERVAL_SEC = 2  # 공식 rate limit 문서가 없어서 arXiv 권장치(3초)에 준하는 보수적 간격
+
+_OAI_DC_NS = {
+    "oai": "http://www.openarchives.org/OAI/2.0/",
+    "dc": "http://purl.org/dc/elements/1.1/",
+    "oai_dc": "http://www.openarchives.org/OAI/2.0/oai_dc/",
+}
+
+# 제목+초록에 이 중 하나도 없으면 LLM 호출(비용) 없이 바로 스킵 — arXiv RSS 패스와 동일한
+# "최소 키워드 1차 거름 -> ingest.py의 LLM 관련성판정이 최종 판단" 패턴.
+_KCI_KEYWORD_RE = re.compile(
+    r"인공지능|AI|생성형|딥러닝|머신러닝|음악|작곡|음원|음성|보이스|목소리|"
+    r"저작권|저작자|창작|딥페이크|생성 AI",
+    re.IGNORECASE,
+)
 
 
 def _fetch_query(query: str) -> list:
@@ -272,6 +364,301 @@ def _fetch_openalex_paginated(query: str, language: str | None = None) -> list[d
     return all_works
 
 
+def _kci_oai_request(params: dict) -> ET.Element:
+    """OAI-PMH는 인증키가 없어서 requests.get()에 params만 실어 보내면 됨. 응답은 XML —
+    ET.fromstring()으로 바로 파싱(추가 의존성 없이 표준 라이브러리만 사용)."""
+    resp = requests.get(KCI_OAI_BASE, params=params, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
+    resp.raise_for_status()
+    return ET.fromstring(resp.content)
+
+
+def _kci_oai_check_error(root: ET.Element) -> str | None:
+    """OAI-PMH는 결과가 없어도 HTTP 200을 주고 <error code="noRecordsMatch">로 알림 —
+    이건 에러가 아니라 "그 날짜엔 없음"이라 조용히 빈 리스트로 처리해야 함. 그 외 에러
+    코드(badArgument 등)는 진짜 문제라 메시지를 반환해서 호출부가 로그를 남기게 함."""
+    error = root.find("oai:error", _OAI_DC_NS)
+    if error is None:
+        return None
+    code = error.get("code", "")
+    if code == "noRecordsMatch":
+        return None  # 결과 없음 — 정상 케이스
+    return f"{code}: {(error.text or '').strip()}"
+
+
+def _kci_dc_text(dc_el: ET.Element, tag: str, lang: str | None = None) -> str:
+    """<dc:{tag} lang="...">를 찾아서 텍스트 반환. lang을 주면 그 lang 우선(없으면 아무거나
+    첫 번째), 여러 개(title/description처럼 lang별로 여러 번 나오는 필드) 중 하나 고를 때 씀."""
+    candidates = dc_el.findall(f"dc:{tag}", _OAI_DC_NS)
+    if not candidates:
+        return ""
+    if lang:
+        for c in candidates:
+            if c.get("lang") == lang and (c.text or "").strip():
+                return c.text.strip()
+    for c in candidates:
+        if (c.text or "").strip():
+            return c.text.strip()
+    return ""
+
+
+def _kci_dc_identifier(dc_el: ET.Element, id_type: str) -> str:
+    """<dc:identifier type="...">는 artiId/doi/journalInfo/citedCnt 등 여러 종류가 type
+    속성으로만 구분돼서 나옴 — type으로 찾아서 텍스트 반환."""
+    for el in dc_el.findall("dc:identifier", _OAI_DC_NS):
+        if el.get("type") == id_type and (el.text or "").strip():
+            return el.text.strip()
+    return ""
+
+
+def _kci_parse_date(dc_date: str) -> date:
+    """dc:date는 "YYYY-MM" 형태(일자 없음) — 월의 1일로 맞춰서 date 객체로 변환.
+    형식이 안 맞으면(예상 밖 값) 오늘 날짜로 폴백."""
+    m = re.match(r"^(\d{4})-(\d{2})", dc_date or "")
+    if not m:
+        return date.today()
+    try:
+        return date(int(m.group(1)), int(m.group(2)), 1)
+    except ValueError:
+        return date.today()
+
+
+def _kci_record_to_row(record: ET.Element) -> dict | None:
+    """OAI-PMH <record> 1건 -> collect() 결과 row. 한국어가 아니거나, 초록이 없거나,
+    주제 키워드가 하나도 없으면 None(스킵)."""
+    header = record.find("oai:header", _OAI_DC_NS)
+    if header is not None and header.get("status") == "deleted":
+        return None  # 삭제된 레코드(OAI-PMH 표준: status="deleted") — 내용 없음
+
+    dc = record.find(".//oai_dc:dc", _OAI_DC_NS)
+    if dc is None:
+        return None
+
+    language = _kci_dc_text(dc, "language")
+    if language != "한국어":
+        return None  # 이 패스는 한국어 논문 전용 — 다른 언어는 OpenAlex 등 다른 패스가 커버
+
+    title = _kci_dc_text(dc, "title", lang="original")
+    abstract = _kci_dc_text(dc, "description", lang="original")
+    if not title or not abstract:
+        return None  # content 필수 — 초록 없는 논문은 스킵
+
+    if not _KCI_KEYWORD_RE.search(f"{title} {abstract}"):
+        return None  # 주제 키워드조차 없으면 LLM 호출(비용) 없이 바로 스킵
+
+    # 2026-09-17 수정: dc:url은 OAI_DC 표준에 없는 태그라 _kci_dc_text로는 항상 빈 값이었음
+    # (오프라인 합성 XML 테스트로 발견) -- 실제 URL은 dc:identifier type="url"로 들어옴.
+    # 이 버그 상태로는 DOI 없는 국내 학회지 논문(흔함)이 전부 url="" 처리돼 스킵됐을 것.
+    url = _kci_dc_identifier(dc, "url") or _kci_dc_identifier(dc, "doi")
+    if not url:
+        return None  # url은 documents 테이블 필수 컬럼 겸 dedup 기준
+
+    return {
+        "title": title,
+        "content": abstract,
+        "url": url,
+        "author": _kci_dc_text(dc, "creator") or None,
+        "category": "AI작곡",  # 1차 힌트일 뿐 — arXiv RSS 패스와 동일하게 LLM 관련성판정이 덮어씀
+        "document_type": "paper",
+        "published_at": _kci_parse_date(_kci_dc_text(dc, "date")),
+        "language": "ko",
+        "source_name": "KCI",
+    }
+
+
+def _kci_rest_request(params: dict) -> ET.Element:
+    """REST는 OAI-PMH와 달리 인증키가 필요 — params에 key를 포함해서 보냄. 응답은 XML."""
+    resp = requests.get(KCI_REST_BASE, params=params, timeout=30)
+    resp.raise_for_status()
+    return ET.fromstring(resp.content)
+
+
+def _kci_rest_check_error(root: ET.Element) -> str | None:
+    """키 미승인/파라미터 오류 등은 error 또는 resultMsg 태그로 옴(정식 스펙 문서에 명시된
+    코드 목록이 없어 텍스트가 있으면 일단 에러로 취급 — test_kci_key.py와 동일한 판정 방식)."""
+    for tag in ("error", "resultMsg"):
+        el = root.find(f".//{tag}")
+        if el is not None and (el.text or "").strip():
+            return el.text.strip()
+    return None
+
+
+def _kci_rest_pick_lang_text(parent: ET.Element | None, child_tag: str) -> str:
+    """title-group/article-title, abstract-group/abstract처럼 lang="original"/"english"로
+    여러 번 나오는 필드에서 original 우선(없으면 아무거나 첫 값) 텍스트를 뽑음."""
+    if parent is None:
+        return ""
+    candidates = parent.findall(child_tag)
+    if not candidates:
+        return ""
+    for c in candidates:
+        if c.get("lang") == "original" and (c.text or "").strip():
+            return c.text.strip()
+    for c in candidates:
+        if (c.text or "").strip():
+            return c.text.strip()
+    return ""
+
+
+def _kci_rest_parse_date(pub_year: str, pub_mon: str) -> date:
+    """journalInfo/pub-year(YYYY) + pub-mon(MM) -> date. pub-mon이 없거나 범위를 벗어나면
+    1월로 폴백, pub-year 자체가 없으면(예상 밖 응답) 오늘 날짜로 폴백."""
+    try:
+        year = int((pub_year or "").strip())
+    except ValueError:
+        return date.today()
+    try:
+        mon = int((pub_mon or "").strip())
+        if not 1 <= mon <= 12:
+            mon = 1
+    except ValueError:
+        mon = 1
+    try:
+        return date(year, mon, 1)
+    except ValueError:
+        return date.today()
+
+
+def _kci_rest_record_to_row(record: ET.Element, category: str) -> dict | None:
+    """REST <record> 1건 -> collect() 결과 row. 제목/초록/URL 중 하나라도 없으면 None(스킵) —
+    구조는 [KCI REST] 모듈 상단 주석 참고."""
+    article = record.find("articleInfo")
+    if article is None:
+        return None
+
+    title = _kci_rest_pick_lang_text(article.find("title-group"), "article-title")
+    if not title:
+        return None
+
+    abstract = _kci_rest_pick_lang_text(article.find("abstract-group"), "abstract")
+    if not abstract:
+        return None  # content 필수 — 초록 없는 논문은 스킵(OAI-PMH 경로와 동일한 정책)
+
+    doi = (article.findtext("doi") or "").strip()
+    url = (article.findtext("url") or "").strip() or (f"https://doi.org/{doi}" if doi else "")
+    if not url:
+        article_id = article.get("article-id") or ""
+        if article_id:
+            url = (
+                "https://www.kci.go.kr/kciportal/ci/sereArticleSearch/ciSereArtiView.kci"
+                f"?sereArticleSearchBean.artiId={article_id}"
+            )
+    if not url:
+        return None  # url은 documents 테이블 필수 컬럼 겸 dedup 기준
+
+    author_group = article.find("author-group")
+    authors = None
+    if author_group is not None:
+        names = [(a.text or "").strip() for a in author_group.findall("author") if (a.text or "").strip()]
+        authors = ", ".join(names) or None
+
+    journal = record.find("journalInfo")
+    journal_name = (journal.findtext("journal-name") or "").strip() if journal is not None else ""
+    pub_year = (journal.findtext("pub-year") or "") if journal is not None else ""
+    pub_mon = (journal.findtext("pub-mon") or "") if journal is not None else ""
+
+    return {
+        "title": title,
+        "content": abstract,
+        "url": url,
+        "author": authors,
+        "category": category,  # 검색 쿼리 자체가 카테고리별이라 OAI-PMH보다 신뢰도 높은 1차 힌트
+        "document_type": "paper",
+        "published_at": _kci_rest_parse_date(pub_year, pub_mon),
+        "language": "ko",
+        "source_name": journal_name or "KCI",
+    }
+
+
+def _fetch_kci_rest(query: str, category: str) -> list[dict]:
+    """title=query로 키워드 검색, displayCount만큼씩 페이지네이션. KCI_API_KEY 없으면 호출부에서
+    아예 안 부름(collect() 참고)."""
+    rows: list[dict] = []
+    for page in range(1, KCI_REST_MAX_PAGES + 1):
+        params = {
+            "apiCode": "articleSearch",
+            "key": KCI_API_KEY,
+            "title": query,
+            "page": page,
+            "displayCount": KCI_REST_DISPLAY_COUNT,
+        }
+        try:
+            root = _kci_rest_request(params)
+        except Exception as e:  # noqa: BLE001 — 이 쿼리만 실패, 나머지 쿼리는 계속 진행
+            print(f"[paper_collector] KCI REST '{query}' {page}페이지 요청 실패: {e}")
+            break
+
+        error = _kci_rest_check_error(root)
+        if error:
+            print(f"[paper_collector] KCI REST '{query}' 에러: {error}")
+            break
+
+        records = root.findall(".//outputData/record")
+        if not records:
+            break
+
+        for record in records:
+            row = _kci_rest_record_to_row(record, category)
+            if row:
+                rows.append(row)
+
+        total_el = root.find(".//result/total")
+        total_text = (total_el.text or "").strip() if total_el is not None else ""
+        total = int(total_text) if total_text.isdigit() else None
+        if total is not None and page * KCI_REST_DISPLAY_COUNT >= total:
+            break  # 이미 전체를 다 받았으면 더 돌 필요 없음
+        if page < KCI_REST_MAX_PAGES:
+            time.sleep(KCI_REST_INTERVAL_SEC)
+
+    return rows
+
+
+def _fetch_kci_oai() -> list[dict]:
+    """set=ARTI, 최근 KCI_OAI_LOOKBACK_DAYS일치를 resumptionToken으로 페이지네이션하며 수확.
+    자세한 배경은 모듈 docstring [KCI OAI-PMH] 참고."""
+    until = date.today()
+    since = until - timedelta(days=KCI_OAI_LOOKBACK_DAYS)
+    params: dict = {
+        "verb": "ListRecords",
+        "metadataPrefix": "oai_dc",
+        "set": KCI_OAI_SET,
+        "from": since.isoformat(),
+        "until": until.isoformat(),
+    }
+
+    rows: list[dict] = []
+    print(
+        f"[paper_collector] KCI OAI-PMH 수확 시작 "
+        f"(최근 {KCI_OAI_LOOKBACK_DAYS}일, 최대 {KCI_OAI_MAX_PAGES}페이지 — "
+        f"응답이 느릴 수 있으니 중간에 출력 없어도 Ctrl+C 하지 말 것)"
+    )
+    for page in range(KCI_OAI_MAX_PAGES):
+        root = _kci_oai_request(params)
+        print(f"[paper_collector] KCI OAI page {page + 1}/{KCI_OAI_MAX_PAGES} 응답 수신 (누적 {len(rows)}건)")
+
+        error = _kci_oai_check_error(root)
+        if error:
+            print(f"[paper_collector] KCI OAI-PMH 에러: {error}")
+            break
+
+        records = root.findall(".//oai:record", _OAI_DC_NS)
+        for record in records:
+            row = _kci_record_to_row(record)
+            if row:
+                rows.append(row)
+
+        token_el = root.find(".//oai:resumptionToken", _OAI_DC_NS)
+        token = (token_el.text or "").strip() if token_el is not None else ""
+        if not token:
+            break  # 더 이상 페이지 없음
+
+        params = {"verb": "ListRecords", "resumptionToken": token}  # 재요청 시 이 두 파라미터만 허용(OAI-PMH 표준)
+        if page < KCI_OAI_MAX_PAGES - 1:
+            time.sleep(KCI_OAI_INTERVAL_SEC)
+
+    print(f"[paper_collector] KCI OAI-PMH 수확 종료 — 총 {len(rows)}건 (로컬 키워드 필터링 전)")
+    return rows
+
+
 def _arxiv_short_id(raw_id: str) -> str:
     """arXiv entry id('http://arxiv.org/abs/2309.01234v1')에서 순수 ID('2309.01234')만 뽑음.
     Semantic Scholar의 externalIds.ArXiv 값과 비교해서 중복을 걸러내는 데 씀."""
@@ -355,6 +742,7 @@ def collect() -> list[dict]:
     seen_arxiv_ids: set[str] = set()
 
     # ---------------- arXiv ----------------
+    print("[paper_collector] 1/7 arXiv 검색 시작")
     for category, queries in QUERIES.items():
         for query in queries:
             try:
@@ -396,6 +784,7 @@ def collect() -> list[dict]:
             time.sleep(REQUEST_INTERVAL_SEC)
 
     # ---------------- arXiv RSS (검색어 없이, 카테고리 전체 최신 논문) ----------------
+    print(f"[paper_collector] 2/7 arXiv RSS 시작 (누적 {len(results)}건)")
     for feed_category in ARXIV_RSS_CATEGORIES:
         try:
             entries = _fetch_arxiv_rss(feed_category)
@@ -449,11 +838,28 @@ def collect() -> list[dict]:
         time.sleep(REQUEST_INTERVAL_SEC)
 
     # ---------------- Semantic Scholar ----------------
+    # 2026-09-19: 연속으로 계속 429가 나면(공유 풀 자체가 이번 세션 내내 막혀있는 상황일
+    # 가능성이 높음) 남은 쿼리를 전부 재시도해봐야 몇 분만 더 날리고 결과는 똑같을 확률이
+    # 높아서, 연속 실패 N회 넘어가면 이번 실행은 Semantic Scholar를 통째로 건너뜀
+    # (다음 실행 때 다시 시도하면 됨 — 여기서 스킵해도 arXiv/OpenAlex/KCI는 그대로 진행).
+    print(f"[paper_collector] 3/7 Semantic Scholar 시작 (누적 {len(results)}건)")
+    SEMANTIC_SCHOLAR_CIRCUIT_BREAKER = 3
+    consecutive_failures = 0
     for category, queries in SEMANTIC_SCHOLAR_QUERIES.items():
+        if consecutive_failures >= SEMANTIC_SCHOLAR_CIRCUIT_BREAKER:
+            break
         for query in queries:
+            if consecutive_failures >= SEMANTIC_SCHOLAR_CIRCUIT_BREAKER:
+                print(
+                    f"[paper_collector] Semantic Scholar {consecutive_failures}연속 실패 — "
+                    "이번 실행은 건너뜀 (다음 실행에서 재시도)"
+                )
+                break
             try:
                 papers = _fetch_semantic_scholar_paginated(query)
+                consecutive_failures = 0
             except Exception as e:  # noqa: BLE001
+                consecutive_failures += 1
                 print(f"[paper_collector] Semantic Scholar '{category}' 쿼리 실패: {e}")
                 continue
 
@@ -495,6 +901,7 @@ def collect() -> list[dict]:
             time.sleep(SEMANTIC_SCHOLAR_INTERVAL_SEC)
 
     # ---------------- OpenAlex (영어/기본) ----------------
+    print(f"[paper_collector] 4/7 OpenAlex(EN) 시작 (누적 {len(results)}건)")
     # 쿼리 세트는 Semantic Scholar와 동일하게 재사용 — 둘 다 필드검색 문법(arXiv의 abs: 같은)
     # 없이 일반 키워드로 검색하는 API라 같은 쿼리 문구를 그대로 쓸 수 있음.
     for category, queries in SEMANTIC_SCHOLAR_QUERIES.items():
@@ -513,6 +920,7 @@ def collect() -> list[dict]:
             time.sleep(OPENALEX_INTERVAL_SEC)
 
     # ---------------- OpenAlex (한국어 논문, language=ko) ----------------
+    print(f"[paper_collector] 5/7 OpenAlex(KO) 시작 (누적 {len(results)}건)")
     # 2026-09-17 추가: KCI Open API 인증키 승인 대기 중 — 그동안 국내 논문 공백을 메우는 임시
     # 대체 경로. 모듈 docstring [OpenAlex 한국 논문] 참고. KCI 승인되면 그쪽이 주력이 되고
     # 이 패스는 계속 병행(겹치는 DOI가 거의 없어 중복 걱정 없음).
@@ -531,6 +939,44 @@ def collect() -> list[dict]:
 
             time.sleep(OPENALEX_INTERVAL_SEC)
 
+    # ---------------- KCI REST (한국어 논문, 키워드 정밀검색) ----------------
+    if KCI_API_KEY:
+        print(f"[paper_collector] 6/7 KCI REST(키워드검색) 시작 (누적 {len(results)}건)")
+        # 2026-09-21 추가: 모듈 상단 [KCI REST] 주석 참고. OPENALEX_KOREAN_QUERIES를 그대로
+        # title 검색어로 재사용 — 이미 카테고리별로 다듬어둔 한국어 쿼리라 그대로 쓸 수 있음.
+        seen_kci_rest_urls: set[str] = set()
+        for category, queries in OPENALEX_KOREAN_QUERIES.items():
+            for query in queries:
+                try:
+                    rows = _fetch_kci_rest(query, category)
+                except Exception as e:  # noqa: BLE001 — 이 쿼리만 실패, 나머지는 계속 진행
+                    print(f"[paper_collector] KCI REST '{category}' 쿼리 실패: {e}")
+                    continue
+
+                for row in rows:
+                    if row["url"] in seen_kci_rest_urls:
+                        continue  # 같은 실행 안에서 쿼리끼리 겹치는 것만 1차로 거름(완전중복은 ingest.py가 최종 처리)
+                    seen_kci_rest_urls.add(row["url"])
+                    results.append(row)
+
+                time.sleep(KCI_REST_INTERVAL_SEC)
+    else:
+        print("[paper_collector] 6/7 KCI REST — KCI_API_KEY 없음, 스킵")
+
+    # ---------------- KCI OAI-PMH (한국어 논문, 최근 등록분 수확) ----------------
+    print(f"[paper_collector] 7/7 KCI OAI-PMH 시작 (누적 {len(results)}건, 수 분 걸릴 수 있음)")
+    # 2026-09-17 추가: 모듈 docstring [KCI OAI-PMH] 참고. REST(위 단계)가 title 키워드로 못
+    # 잡는 논문(제목엔 안 나오지만 본문/초록에 주제가 있는 경우 등)까지 폭넓게 보완하는 역할로
+    # 계속 병행 — 둘 다 같은 KCI 저장소라 겹치는 논문이 나올 수 있지만 url이 같으면 ingest.py
+    # 단계의 content_hash/근접중복 검사가 최종적으로 걸러줌.
+    try:
+        kci_rows = _fetch_kci_oai()
+    except Exception as e:  # noqa: BLE001 — 이 소스 실패해도 나머지 결과는 그대로 반환
+        print(f"[paper_collector] KCI OAI-PMH 수확 실패: {e}")
+        kci_rows = []
+    results.extend(kci_rows)
+
+    print(f"[paper_collector] 전체 수집 완료 — 총 {len(results)}건 (ingest 단계로 넘어감)")
     return results
 
 

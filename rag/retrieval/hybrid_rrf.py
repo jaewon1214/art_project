@@ -14,6 +14,13 @@ context_builder.py가 exact_match_search 결과를 가중치 목적으로 두 �
 객체를 그대로 두 번 전달), 그걸 채널 2개로 잘못 세면 exact-only 매칭이 "복수 채널 합의"로
 둔갑해버리므로, list_id 기준으로 세면 같은 객체가 몇 번 들어오든 채널 1개로 정확히 잡힘.
 반대로 vector/keyword처럼 서로 다른 리스트 객체는 각각 다른 채널로 정상 카운트됨.
+
+2026-09-21: 반환 딕셔너리에 document_type 필드 추가 — vector/keyword/graph/exact_match
+네 검색 함수 모두 이제 SELECT에 documents.document_type을 포함해서 반환하는데(각 모듈의
+2026-09-21 코멘트 참고), meta[cid]에는 그 원본 dict가 그대로 저장되므로 값 자체는 이미 들어와
+있었지만 이 함수의 반환 dict는 필드를 하나하나 명시적으로 골라서 만들기 때문에 document_type을
+여기서도 명시적으로 뽑아주지 않으면 새로 만들어지는 반환 dict에서는 그냥 사라짐 — 아래처럼
+직접 추가해야 context_builder.py의 문서유형 다양성 선별 로직까지 흘러감.
 """
 from __future__ import annotations
 
@@ -27,9 +34,11 @@ def reciprocal_rank_fusion(
 ) -> list[dict]:
     """
     result_lists: vector_search/keyword_search/graph_search가 반환하는 형식과 동일한
-        [{"chunk_id", "document_id", "content", "rank"}, ...] 리스트를 원하는 개수만큼 넘기면 됨.
+        [{"chunk_id", "document_id", "content", "document_type", "rank"}, ...] 리스트를
+        원하는 개수만큼 넘기면 됨.
     반환: score 내림차순으로 정렬된
-        [{"chunk_id", "document_id", "content", "score", "channel_count"}, ...] (top_k개)
+        [{"chunk_id", "document_id", "content", "document_type", "score", "channel_count"}, ...]
+        (top_k개)
     """
     scores: dict[str, float] = {}
     meta: dict[str, dict] = {}
@@ -49,6 +58,7 @@ def reciprocal_rank_fusion(
             "chunk_id": cid,
             "document_id": meta[cid]["document_id"],
             "content": meta[cid]["content"],
+            "document_type": meta[cid].get("document_type"),
             "score": score,
             "channel_count": len(channel_ids[cid]),
         }

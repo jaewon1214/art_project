@@ -16,7 +16,9 @@ from rag.retrieval.metadata_filter import build_filter
 def keyword_search(conn, query_text: str, category: str | None = None, top_k: int = 50) -> list[dict]:
     """
     query_text와 매칭되는 chunk를 ts_rank 기준 top_k개 반환.
-    반환: [{"chunk_id": ..., "document_id": ..., "content": ..., "rank": 1}, ...]  (rank는 1부터, RRF용)
+    반환: [{"chunk_id": ..., "document_id": ..., "content": ..., "document_type": ..., "rank": 1}, ...]
+    (rank는 1부터, RRF용. document_type은 2026-09-21 추가 — vector_search.py와 동일한 이유,
+    context_builder.py의 문서유형 다양성 선별 로직에 씀.)
     """
     filter_sql, filter_params = build_filter(category=category)
 
@@ -24,7 +26,7 @@ def keyword_search(conn, query_text: str, category: str | None = None, top_k: in
     tokenized_query = tokenize_for_search(query_text) or query_text
 
     sql = f"""
-        SELECT c.id AS chunk_id, c.document_id, c.content,
+        SELECT c.id AS chunk_id, c.document_id, c.content, d.document_type,
                ROW_NUMBER() OVER (
                    ORDER BY ts_rank(c.content_tsv, plainto_tsquery('simple', %s)) DESC
                ) AS rnk
@@ -41,6 +43,6 @@ def keyword_search(conn, query_text: str, category: str | None = None, top_k: in
         rows = cur.fetchall()
 
     return [
-        {"chunk_id": r[0], "document_id": r[1], "content": r[2], "rank": r[3]}
+        {"chunk_id": r[0], "document_id": r[1], "content": r[2], "document_type": r[3], "rank": r[4]}
         for r in rows
     ]

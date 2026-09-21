@@ -62,7 +62,7 @@ def exact_match_search(conn, query_text: str, category: str | None = None, top_k
     like_params = [f"%{c}%" for c in candidates]
 
     sql = f"""
-        SELECT c.id AS chunk_id, c.document_id, c.content,
+        SELECT c.id AS chunk_id, c.document_id, c.content, d.document_type,
                ROW_NUMBER() OVER (ORDER BY ({score_terms}) DESC) AS rnk
         FROM chunks c
         JOIN documents d ON d.id = c.document_id
@@ -77,8 +77,9 @@ def exact_match_search(conn, query_text: str, category: str | None = None, top_k
         cur.execute(sql, params)
         rows = cur.fetchall()
 
+    # document_type은 2026-09-21 추가 — vector_search.py와 동일한 이유(다양성 선별 로직에 씀).
     return [
-        {"chunk_id": r[0], "document_id": r[1], "content": r[2], "rank": r[3]}
+        {"chunk_id": r[0], "document_id": r[1], "content": r[2], "document_type": r[3], "rank": r[4]}
         for r in rows
     ]
 

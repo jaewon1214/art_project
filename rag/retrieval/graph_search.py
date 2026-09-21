@@ -94,10 +94,11 @@ def graph_search(conn, query_text: str, top_k: int = 30) -> list[dict]:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT id, document_id, content
-                FROM chunks
-                WHERE document_id = ANY(%s::uuid[])
-                ORDER BY document_id, chunk_index;
+                SELECT c.id, c.document_id, c.content, d.document_type
+                FROM chunks c
+                JOIN documents d ON d.id = c.document_id
+                WHERE c.document_id = ANY(%s::uuid[])
+                ORDER BY c.document_id, c.chunk_index;
                 """,
                 (document_ids,),
             )
@@ -110,9 +111,11 @@ def graph_search(conn, query_text: str, top_k: int = 30) -> list[dict]:
 
     # 그래프 매칭 강도(document_ids 순서)를 그대로 rank로 씀 — 같은 문서의 chunk들은
     # 문서 단위로 매겨진 관련성을 공유(그래프 검색은 애초에 문서/엔티티 단위 신호라서 자연스러움).
+    # document_type은 2026-09-21 추가 — 기존엔 chunks 단독 조회라 documents JOIN이 없었는데,
+    # 다양성 선별 로직에 필요해져서 다른 세 채널과 동일하게 documents를 JOIN함.
     doc_rank = {doc_id: i + 1 for i, doc_id in enumerate(document_ids)}
     results = [
-        {"chunk_id": r[0], "document_id": r[1], "content": r[2], "rank": doc_rank[r[1]]}
+        {"chunk_id": r[0], "document_id": r[1], "content": r[2], "document_type": r[3], "rank": doc_rank[r[1]]}
         for r in rows
     ]
     return results[:top_k]

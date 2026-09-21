@@ -22,6 +22,34 @@ RAG가 반환한 sources를 그대로 최종 참고문헌 목록에 넣다 보�
 스키마(딕셔너리 키 구성)는 그대로라 3번 쪽 호출부는 변경 없이 그대로 써도 됨 — sources 항목에
 score 키가 "추가"될 뿐 기존 키는 전부 유지됨. 자세한 필터 기준은 아래 search_context() 본문 참고.
 
+2026-09-21: 위 필터를 실제 생성 논문 3건으로 역추적한 결과, 근거 문서가 2~3건까지 쪼그라드는
+과도한 필터링이 확인됨 — 원인은 "활성 채널 2개 이상이면 합의(2채널 이상 동시 매칭) 요구"
+조건이 vector/keyword라는 사실상 상시 활성인 baseline 2채널만으로도 그냥 켜져버리는 것.
+graph/exact 채널이 니치 주제에서 구조적으로 자주 비어있는 현재 상황(Neo4j 엔티티 적재량 부족
+— backfill_entity_extraction.py로 별도 보완 중)에서는, "활성 채널 2개"가 사실상 "vector와
+keyword가 같은 chunk를 동시에 잡아야만 통과"를 의미하게 되어 의미적으로만 맞거나 형태소만
+겹치는 정상적으로 관련 있는 문서까지 과도하게 걸러졌음. 그래서 합의 요구 기준을
+"활성 채널 3개 이상"(=graph/exact 중 최소 하나가 실제로 신호를 냈을 때)으로 올리고, baseline
+2채널만 활성인 상태에서는 단일채널 점수 기준 자체를 완화(rank<=3 -> rank<=6 수준)해서 대신
+적용하도록 바꿈. graph 채널이 백필로 채워지면 활성 채널 3개 이상인 경우가 늘어 원래의 엄격한
+합의 기준이 자연히 더 자주 적용되게 됨 — 이번 변경은 그 전까지의 임시 완화가 아니라, "합의를
+요구하려면 합의할 대상이 실제로 있어야 한다"는 원칙에 맞춘 구조적 수정.
+
+2026-09-21 (2차): 팀 피드백 2건을 추가로 반영.
+(1) 다양성/적합도 — 위 필터를 통과한 chunk들이 종종 같은 문서 유형(예: 뉴스만, 혹은 같은
+문서의 여러 chunk)으로 top_k가 채워져서 최종 참고문헌이 편중됨. _select_diverse()로
+document_type(공식자료/논문/판례·법률자료/뉴스 등)이 골고루 섞이도록 문서당 최상위 chunk를
+유형별 라운드로빈으로 고르고, distinct 문서 수가 top_k보다 적으면(니치 주제) 근거 개수가
+줄지 않도록 남은 후보로 채운다. 최소 관련성 필터 다음, top_k로 자르기 전에 적용해야
+"어차피 top_k 밖으로 밀릴 후보"까지 다양성 판단 대상에 넣을 수 있다.
+(2) 주제와 다른 자료 검색 문제 — 게임 저작권 기사가 "저작권"/"AI" 단어 겹침만으로 음악 관련
+검색에 섞여 들어오는 사례가 확인됨. 정규식 키워드 게이트(값싸지만 부정확)보다 정확한 방법으로,
+rerank_by_relevance()(rag/retrieval/relevance_rerank.py)를 통해 최소 관련성 필터를 통과한
+후보에 대해 LLM 1회 호출로 "주제와 실질적으로 관련 있는지"를 재판정한다. 다양성 선별보다
+먼저 적용함 — 애초에 주제와 무관한 후보는 유형이 얼마나 다양하든 처음부터 뽑히면 안 되므로.
+파이프라인 순서: 최소관련성필터(_passes) -> LLM 재판정(rerank_by_relevance) ->
+유형다양성선별(_select_diverse, 여기서 top_k로 자름).
+
 반환 형식(공통 규약):
 {
   "contexts": [
@@ -41,21 +69,97 @@ from rag.retrieval.exact_match_search import exact_match_search
 from rag.retrieval.graph_search import graph_search
 from rag.retrieval.hybrid_rrf import DEFAULT_K, reciprocal_rank_fusion
 from rag.retrieval.keyword_search import keyword_search
+from rag.retrieval.relevance_rerank import rerank_by_relevance
 from rag.retrieval.vector_search import vector_search
 
 # 단일 채널만 짚었더라도 그 채널 안에서 확실히 상위(3위 이내)로 걸렸으면 통과시키는 점수 하한선.
 # hybrid_rrf.py 계산대로 단일 채널 rank=1 ≈ 0.0164, rank=3 ≈ 0.0159, rank=10 ≈ 0.0143이라,
 # 이 값(rank=3 기준)은 "그 채널이 확신을 갖고 상위로 올린 것"과 "10위권 근처에서 애매하게 걸린
-# 것"을 가른다.
+# 것"을 가른다. 활성 채널이 3개 이상(REQUIRE_CORROBORATION_MIN_ACTIVE_CHANNELS 이상)일 때만 씀.
 MIN_SINGLE_CHANNEL_SCORE = 1.0 / (DEFAULT_K + 3)
 
-# 서로 다른 채널이 최소 몇 개 동시에 짚어야 "우연이 아니다"로 볼지.
+# 2026-09-21 추가: vector+keyword만 활성인(=baseline 2채널만 신호를 낸) 상태에서 쓰는 완화된
+# 단일채널 기준 — rank<=6 수준(1/(60+6)≈0.01515). 합의(다른 채널과의 corroboration)를 요구할
+# 대상 자체가 없는 상황이라, 대신 순위 컷오프를 3위에서 6위로 넓혀서 지나치게 좁아지는 걸 막는다.
+MIN_SINGLE_CHANNEL_SCORE_BASELINE_ONLY = 1.0 / (DEFAULT_K + 6)
+
+# 서로 다른 채널이 최소 몇 개 동시에 짚어야 "우연이 아니다"로 볼지 — channel_count 기준.
 MIN_CHANNELS_FOR_CORROBORATION = 2
+
+# 2026-09-21 추가: "합의를 요구할지" 자체를 켜는 기준 — 활성 채널이 이 값 이상일 때만 위
+# MIN_CHANNELS_FOR_CORROBORATION 합의 요구를 켠다. vector/keyword는 embedding/DB가 정상
+# 설정된 한 사실상 상시 활성이라, "활성 채널 2개"만으로 합의를 요구하면 그 둘끼리의 합의만
+# 요구하는 꼴이 되어버림(graph/exact가 구조적으로 자주 비는 니치 주제에서 과도한 필터링 유발
+# — 2026-09-21 생성 논문 3건에서 근거 2~3건으로 쪼그라드는 현상으로 확인됨). 그래서 graph/exact
+# 중 최소 하나가 실제로 신호를 낸 경우(활성 채널 3개 이상)에만 합의를 요구하도록 올림.
+REQUIRE_CORROBORATION_MIN_ACTIVE_CHANNELS = 3
 
 # RRF에 넘기는 후보 풀은 최종 top_k보다 넉넉하게 뽑아서(필터링으로 일부가 빠져도 top_k를 채울
 # 여지를 남김) 필터링 이후에 top_k로 자른다.
 CANDIDATE_POOL_MIN = 20
 CANDIDATE_POOL_MULTIPLIER = 4
+
+
+def _select_diverse(candidates: list[dict], top_k: int) -> list[dict]:
+    """candidates(score 내림차순, 최소관련성필터+LLM재판정을 통과한 것들)에서 문서 유형
+    (document_type)이 골고루 섞이도록 top_k개를 고른다.
+
+    2026-09-21 추가 — 리뷰한 생성 논문 3건에서 판례/뉴스 등 유형이 섞이지 않고 같은 유형
+    문서의 chunk 여러 개로 top_k가 채워지는 경우가 많았음(팀 피드백 "다양성/적합도" 항목).
+
+    절차:
+    1) 문서당 최상위(=먼저 나오는, score 내림차순이므로) chunk 하나만 남김 — 같은 문서의
+       chunk를 여러 개 넣어봐야 "유형 다양성"에는 기여하지 않으므로.
+    2) document_type별로 그룹을 나누고, 그룹이 처음 등장한 순서(=그 유형의 최고점 후보가
+       먼저 나온 순서)를 유지한 채 그룹 간 라운드로빈으로 하나씩 뽑는다.
+    3) distinct 문서 수 자체가 top_k보다 적어서 못 채웠으면(니치 주제 등), 다양성보다
+       "근거 개수가 줄면 안 된다"가 우선이므로 이미 뽑힌 chunk를 제외한 나머지 후보
+       (같은 문서의 다음 순위 chunk 포함)를 점수 순으로 채워 top_k를 맞춘다.
+    """
+    if not candidates:
+        return candidates
+
+    seen_docs: set[str] = set()
+    best_per_doc: list[dict] = []
+    for r in candidates:
+        doc_id = r["document_id"]
+        if doc_id in seen_docs:
+            continue
+        seen_docs.add(doc_id)
+        best_per_doc.append(r)
+
+    buckets: dict = {}
+    order: list = []  # 버킷(유형) 등장 순서 — 그 유형의 최고점 후보가 먼저 나온 순서
+    for r in best_per_doc:
+        dtype = r.get("document_type")
+        if dtype not in buckets:
+            buckets[dtype] = []
+            order.append(dtype)
+        buckets[dtype].append(r)
+
+    selected: list[dict] = []
+    selected_chunk_ids: set[str] = set()
+    idx = 0
+    remaining = len(best_per_doc)
+    while len(selected) < top_k and remaining > 0:
+        dtype = order[idx % len(order)]
+        if buckets[dtype]:
+            r = buckets[dtype].pop(0)
+            selected.append(r)
+            selected_chunk_ids.add(r["chunk_id"])
+            remaining -= 1
+        idx += 1
+
+    if len(selected) < top_k:
+        for r in candidates:
+            if len(selected) >= top_k:
+                break
+            if r["chunk_id"] in selected_chunk_ids:
+                continue
+            selected.append(r)
+            selected_chunk_ids.add(r["chunk_id"])
+
+    return selected[:top_k]
 
 
 def _fetch_sources(conn, document_ids: list[str], doc_scores: dict[str, float]) -> list[dict]:
@@ -98,7 +202,11 @@ def search_context(topic: str, category: str | None = None, top_k: int = 5) -> d
     채널이어도 그 안에서 확실히 상위(rank<=3 수준)로 걸린" chunk만 통과시키고 나머지는
     contexts/sources에서 제외함. 단, embedding/Neo4j 등이 미설정이라 애초에 활성 채널이 1개뿐인
     상황(MVP 초기 등)에서는 "2개 채널 합의"를 요구하면 전부 걸러지는 사고가 나므로, 활성 채널이
-    2개 이상일 때만 이 합의 규칙을 적용한다.
+    REQUIRE_CORROBORATION_MIN_ACTIVE_CHANNELS(3) 이상일 때만 이 합의 규칙을 적용한다 —
+    2026-09-21: 원래는 "활성 채널 2개 이상"이 기준이었는데, vector+keyword(사실상 상시 활성인
+    baseline 2채널)만 켜진 상태에서도 합의를 요구해버려 니치 주제에서 근거가 과도하게 걸러지는
+    문제가 실제 생성 논문에서 확인되어 3으로 올림. baseline 2채널만 활성일 때는 대신
+    MIN_SINGLE_CHANNEL_SCORE_BASELINE_ONLY(rank<=6 수준)로 완화된 단일채널 기준을 적용한다.
     """
     with get_connection() as conn:
         try:
@@ -125,14 +233,27 @@ def search_context(topic: str, category: str | None = None, top_k: int = 5) -> d
         active_channels = sum(
             1 for results in (vec_results, kw_results, graph_results, exact_results) if results
         )
-        require_corroboration = active_channels >= MIN_CHANNELS_FOR_CORROBORATION
+        # 2026-09-21: "활성 채널 2개"(=baseline인 vector+keyword만 켜진 상태)만으로 합의를
+        # 요구하면 사실상 "둘 다 동시에 잡아야만 통과"가 되어 과도하게 걸러짐 — graph/exact 중
+        # 최소 하나가 실제로 신호를 낸(활성 채널 3개 이상) 경우에만 합의를 요구하고, baseline
+        # 2채널뿐일 때는 단일채널 기준 자체를 완화(rank<=3 -> rank<=6)해서 대신 적용한다.
+        require_corroboration = active_channels >= REQUIRE_CORROBORATION_MIN_ACTIVE_CHANNELS
+        single_channel_threshold = (
+            MIN_SINGLE_CHANNEL_SCORE if require_corroboration else MIN_SINGLE_CHANNEL_SCORE_BASELINE_ONLY
+        )
 
         def _passes(r: dict) -> bool:
-            if r["score"] >= MIN_SINGLE_CHANNEL_SCORE:
+            if r["score"] >= single_channel_threshold:
                 return True
             return require_corroboration and r["channel_count"] >= MIN_CHANNELS_FOR_CORROBORATION
 
-        fused = [r for r in fused_candidates if _passes(r)][:top_k]
+        # 파이프라인: 최소관련성필터 -> LLM 재판정(주제와 실질적으로 무관한 후보 제거) ->
+        # 문서유형 다양성 선별(여기서 top_k로 자름). top_k 슬라이싱을 마지막으로 미루는 이유는
+        # 앞 두 단계가 순서를 바꾸거나(다양성 선별) 일부를 제거할 수 있어서(재판정), 미리 잘라
+        # 버리면 뒤 단계가 다룰 후보 자체가 부족해질 수 있기 때문.
+        passed = [r for r in fused_candidates if _passes(r)]
+        passed = rerank_by_relevance(topic, passed)
+        fused = _select_diverse(passed, top_k)
 
         doc_scores: dict[str, float] = {}
         for r in fused:
