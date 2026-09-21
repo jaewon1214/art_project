@@ -522,6 +522,15 @@ class OpenAILLMService:
             content,
         )
 
+        # 유효하지 않은 citation marker가 제거되면서
+        # 구두점 앞에 공백만 남는 경우를 정리한다.
+        # 예: "문장 [fake-source]." -> "문장."
+        cleaned = re.sub(
+            r"\s+([.,!?;:)])",
+            r"\1",
+            cleaned,
+        )
+
         cleaned = cls._clean_generated_text(
             cleaned
         )
@@ -697,6 +706,28 @@ class OpenAILLMService:
             if not sanitized_content:
                 continue
 
+            # Structured Output의 citations 배열이 비어 있어도
+            # 본문에 실제 유효한 [source_id]가 존재하면
+            # 해당 출처를 section citation으로 보존한다.
+            for inline_citation in re.findall(
+                r"\[([^\[\]]+)\]",
+                sanitized_content,
+            ):
+                citation_id = (
+                    cls._normalize_citation_id(
+                        inline_citation
+                    )
+                )
+
+                if (
+                    citation_id in valid_source_ids
+                    and citation_id
+                    not in valid_citations
+                ):
+                    valid_citations.append(
+                        citation_id
+                    )
+
             normalized_content = (
                 cls._normalize_text(
                     sanitized_content
@@ -851,13 +882,32 @@ class OpenAILLMService:
                 "LLM 결과의 결론이 비어 있습니다."
             )
 
+        # 최종 참고문헌에는 실제 논문에서 사용된 출처만 남긴다.
+        # section citation과 provenance 검증을 통과한 evidence의
+        # document_id를 모두 반영하되, RAG source의 원래 순서는 유지한다.
+        cited_source_ids = {
+            citation_id
+            for section in validated_sections
+            for citation_id in section.citations
+        }
+        cited_source_ids.update(
+            citation.document_id
+            for citation in paper_citations
+        )
+
+        references = [
+            source
+            for source in rag_result.sources
+            if source.source_id in cited_source_ids
+        ]
+
         final_paper = FinalPaper(
             paper_id=str(uuid4()),
             title=title,
             abstract=abstract,
             sections=validated_sections,
             conclusion=conclusion,
-            references=rag_result.sources,
+            references=references,
             paper_citations=paper_citations,
         )
 

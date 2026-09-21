@@ -197,7 +197,8 @@ def test_references_are_removed_from_conclusion():
     assert "참고문헌" not in result.conclusion
     assert "Fake Author" not in result.conclusion
 
-    assert len(result.references) == 2
+    assert len(result.references) == 1
+    assert result.references[0].source_id == "doc-1"
 
 
 def test_valid_evidence_creates_paper_citation():
@@ -513,3 +514,81 @@ def test_internal_generation_process_is_rejected():
             generated=generated,
             rag_result=make_rag_result(),
         )
+
+
+def test_inline_citation_without_structured_citation_keeps_reference():
+    generated = GeneratedPaperContent(
+        title="생성형 AI와 음악 창작",
+        abstract="초록입니다.",
+        sections=[
+            GeneratedSection(
+                heading="저작권",
+                content="본문 내용입니다. [doc-1]",
+                citations=[],
+            ),
+        ],
+        conclusion="결론입니다.",
+    )
+
+    result = OpenAILLMService._build_final_paper(
+        generated=generated,
+        rag_result=make_rag_result(),
+    )
+
+    assert result.sections[0].citations == ["doc-1"]
+    assert [
+        source.source_id
+        for source in result.references
+    ] == ["doc-1"]
+
+
+def test_unused_rag_source_is_removed_from_references():
+    generated = GeneratedPaperContent(
+        title="생성형 AI와 음악 창작",
+        abstract="초록입니다.",
+        sections=[
+            GeneratedSection(
+                heading="저작권",
+                content="본문 내용입니다. [doc-1]",
+                citations=["doc-1"],
+            ),
+        ],
+        conclusion="결론입니다.",
+    )
+
+    result = OpenAILLMService._build_final_paper(
+        generated=generated,
+        rag_result=make_rag_result(),
+    )
+
+    assert [
+        source.source_id
+        for source in result.references
+    ] == ["doc-1"]
+
+
+def test_invalid_inline_citation_removal_cleans_space_before_punctuation():
+    generated = GeneratedPaperContent(
+        title="생성형 AI와 음악 창작",
+        abstract="초록입니다.",
+        sections=[
+            GeneratedSection(
+                heading="저작권",
+                content="이 주장은 확인되지 않았습니다 [fake-source].",
+                citations=["fake-source"],
+            ),
+        ],
+        conclusion="결론입니다.",
+    )
+
+    result = OpenAILLMService._build_final_paper(
+        generated=generated,
+        rag_result=make_rag_result(),
+    )
+
+    assert (
+        result.sections[0].content
+        == "이 주장은 확인되지 않았습니다."
+    )
+    assert result.sections[0].citations == []
+    assert result.references == []
