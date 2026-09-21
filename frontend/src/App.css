@@ -589,3 +589,91 @@
     line-height: 1.95;
   }
 }
+
+/* PDF download */
+.paper-download-area {
+  max-width: 900px;
+  margin: 0 auto 14px;
+}
+
+.paper-download-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.paper-download-button {
+  min-height: 38px;
+  padding: 8px 13px;
+  border: 1px solid var(--navy-dark);
+  border-radius: 4px;
+  background: var(--navy);
+  color: #ffffff;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 750;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.paper-download-button:hover:not(:disabled) {
+  background: var(--navy-dark);
+}
+
+.paper-download-button.secondary {
+  border-color: #b9bcc0;
+  background: #ffffff;
+  color: #303943;
+}
+
+.paper-download-button.secondary:hover:not(:disabled) {
+  border-color: #8e949a;
+  background: #f7f7f4;
+}
+
+.paper-download-button:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+
+.paper-download-error {
+  margin: 7px 0 0;
+  color: var(--danger);
+  font-size: 10px;
+  text-align: right;
+}
+
+/*
+ * html2canvas용 임시 렌더링 영역.
+ * 화면에는 보이지 않지만 실제 DOM에 붙여 한글 웹폰트와 현재 논문 스타일을
+ * 그대로 캡처한다.
+ */
+.pdf-capture-root {
+  position: fixed;
+  top: 0;
+  left: -100000px;
+  width: 900px;
+  z-index: -9999;
+  pointer-events: none;
+  background: #ffffff;
+}
+
+.pdf-capture-root .pdf-capture-document {
+  width: 900px;
+  max-width: none;
+  margin: 0;
+  border: 0;
+  box-shadow: none;
+}
+
+@media (max-width: 560px) {
+  .paper-download-actions {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .paper-download-button {
+    width: 100%;
+  }
+}
