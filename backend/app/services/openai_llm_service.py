@@ -114,6 +114,7 @@ class OpenAILLMService:
         rag_result: RagResult,
         draft: TransformerDraft,
         length: int,
+        forced_title: str | None = None,
     ) -> FinalPaper:
         # 프로젝트 전체 최대 분량은 4500자.
         # 사용자가 더 작은 값을 요청하면
@@ -149,6 +150,7 @@ class OpenAILLMService:
             generated=generated,
             rag_result=rag_result,
             max_chars=effective_length,
+            forced_title=forced_title,
         )
 
     @staticmethod
@@ -583,6 +585,7 @@ class OpenAILLMService:
         generated: GeneratedPaperContent,
         rag_result: RagResult,
         max_chars: int | None = None,
+        forced_title: str | None = None,
     ) -> FinalPaper:
         """
         OpenAI Structured Output을 검증하여
@@ -848,14 +851,17 @@ class OpenAILLMService:
                 "LLM 결과에 유효한 본문 섹션이 없습니다."
             )
 
-        title = (
-            cls._clean_generated_text(
-                generated.title
+        if forced_title is not None:
+            title = forced_title.strip()
+        else:
+            title = (
+                cls._clean_generated_text(
+                    generated.title
+                )
+                .strip()
+                .strip("\"'“”‘’")
+                .strip()
             )
-            .strip()
-            .strip("\"'“”‘’")
-            .strip()
-        )
 
         abstract = cls._clean_generated_text(
             generated.abstract

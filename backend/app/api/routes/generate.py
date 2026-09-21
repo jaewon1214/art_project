@@ -20,4 +20,5 @@ async def generate(
     return await paper_service.generate(
         topic=request.topic,
         length=request.length,
+        input_type=request.input_type,
     )

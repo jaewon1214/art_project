@@ -1,7 +1,17 @@
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
 class GenerateRequest(BaseModel):
+    input_type: Literal["topic", "title"] = Field(
+        default="topic",
+        description=(
+            "topic이면 입력을 연구 주제로 사용하고, "
+            "title이면 입력값을 최종 논문 제목으로 그대로 사용합니다."
+        ),
+    )
+
     topic: str = Field(
         ...,
         min_length=3,
