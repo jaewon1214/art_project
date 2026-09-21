@@ -11,17 +11,34 @@ news 문서를 url로 다시 방문해서 news_collector.py의 _extract_page_pub
 완전히 같은 로직으로 게재일을 재확인하고, 값이 다르면 바로잡음. (같은 함수를 그대로 import해서
 쓰기 때문에 로직이 어긋날 일이 없음 — 나중에 그쪽을 고치면 이 스크립트도 자동으로 같이 고쳐짐.)
 
+2026-09-21 업데이트: 같은 종류의 사고가 또 발견됨 — "Digital Music News" 피드는
+_extract_page_published_date()(meta/time/JSON-LD)와 RSS의 published_parsed 둘 다 실패해서
+매번 조용히 수집일로 대체되고 있었음(실측: id=4986f260-d971-4647-8ecd-829c9789210c, Ashley
+King 기사, 실제 게재일은 URL 슬러그상 2026-09-03인데 published_at=2026-09-16=created_at
+날짜와 동일 — 같은 매체 문서 13건에서 동일 패턴 확인). news_collector.py 쪽에 (a) meta 태그
+느슨한 매칭(속성 이름에 date/time/publish가 들어가면 전부 시도), (b) URL 경로의
+/YYYY/MM/DD/ 패턴 추출(_extract_url_date — 워드프레스 계열 CMS에 흔한 패턴이라 특정 매체를
+몰라도 커버됨), (c) RSS updated_parsed 폴백, (d) 폴백 발생 시 경고 로그, 이렇게 네 가지를
+추가했음. 이 스크립트도 _extract_url_date를 같이 import해서 _extract_page_published_date(soup)가
+실패하면 URL 패턴도 마저 시도하도록 맞춤 — 안 그러면 news_collector.py는 이미 고쳐졌는데 이
+백필 스크립트만 구버전 로직으로 남아서, meta 태그 자체가 없는 Digital Music News 같은 사이트는
+재방문해도 여전히 못 잡는 상태가 됨.
+
 본문(content)/chunks/embedding은 전혀 안 건드림 — documents.published_at 컬럼만 갱신.
 
-페이지에 게재일 메타데이터가 아예 없는 경우(구식 사이트, 메타태그 미제공 등)는 기존 값을
-함부로 지우지 않고 그대로 둠 — "메타데이터가 없다"가 "기존 값이 틀렸다"를 증명하진 않으므로.
+페이지에 게재일 정보가 끝까지(meta/time/JSON-LD/URL 패턴 다) 없는 경우는 기존 값을 함부로
+지우지 않고 그대로 둠 — "메타데이터가 없다"가 "기존 값이 틀렸다"를 증명하진 않으므로.
 
 실행 (secondpj 루트에서, venv 활성화 상태로):
-    python -m rag.scripts.backfill_fix_published_dates              # 뭐가 바뀔지만 미리 확인 (기본, 안전)
-    python -m rag.scripts.backfill_fix_published_dates --apply       # 실제로 DB에 반영
+    python -m rag.scripts.backfill_fix_published_dates                        # 미리보기 (기본, 안전)
+    python -m rag.scripts.backfill_fix_published_dates --source="Digital Music News"   # 특정 매체만 미리보기
+    python -m rag.scripts.backfill_fix_published_dates --apply --limit=20     # 소규모로 먼저 반영 확인
+    python -m rag.scripts.backfill_fix_published_dates --apply                # 전체 반영
 
---dry-run이 기본값인 이유: 이 스크립트는 news 문서 전체를 다시 fetch하는 대규모 작업이라
-먼저 훑어보고 바뀔 항목 수를 눈으로 확인한 뒤에 실제 반영하는 게 안전함.
+--dry-run이 기본값인 이유: news 문서 전체를 다시 fetch하는 대규모 작업이라 먼저 훑어보고
+바뀔 항목 수를 눈으로 확인한 뒤에 실제 반영하는 게 안전함. --source/--limit은 이번에 발견된
+Digital Music News처럼 특정 매체만 먼저 좁혀서 확인하고 싶을 때 씀 — backfill_fix_arxiv_paper_noise.py
+등 다른 백필 스크립트와 동일하게 argparse 없이 "--flag=value" 형태로 받음.
 """
 from __future__ import annotations
 
@@ -32,7 +49,11 @@ from datetime import date
 import requests
 from bs4 import BeautifulSoup
 
-from collector.news_collector import _BROWSER_HEADERS, _extract_page_published_date
+from collector.news_collector import (
+    _BROWSER_HEADERS,
+    _extract_page_published_date,
+    _extract_url_date,
+)
 from rag import config
 
 # news_collector.py와 동일한 정중한 간격 — 짧은 시간에 같은 매체로 요청이 몰려서
@@ -44,28 +65,57 @@ SLEEP_SEC = 1.0
 def _fetch_page_date(url: str) -> date | None:
     resp = requests.get(url, timeout=10, headers=_BROWSER_HEADERS)
     resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "html.parser")
-    return _extract_page_published_date(soup)
+    # 2026-09-19: resp.text 대신 resp.content — 서버가 charset을 안 밝히면 requests가
+    # ISO-8859-1로 잘못 추측해서 UTF-8 페이지가 깨지는 버그 회피(news_collector.py/add_url.py와
+    # 동일 이유 — BeautifulSoup 자체 인코딩 감지가 더 정확함).
+    soup = BeautifulSoup(resp.content, "html.parser")
+    # 2026-09-21: meta/time/JSON-LD가 다 실패해도 URL의 /YYYY/MM/DD/ 패턴으로 한 번 더 시도
+    # (news_collector.py의 동일 폴백과 맞춤 — 자세한 이유는 위 모듈 docstring 참고).
+    return _extract_page_published_date(soup) or _extract_url_date(url)
 
 
 def main() -> None:
     apply_changes = "--apply" in sys.argv
 
+    source_filter: str | None = None
+    limit: int | None = None
+    for arg in sys.argv:
+        if arg.startswith("--source="):
+            source_filter = arg.split("=", 1)[1]
+        elif arg.startswith("--limit="):
+            limit = int(arg.split("=", 1)[1])
+
     with config.get_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT d.id, d.url, d.published_at, d.title, s.name
-                FROM documents d
-                JOIN sources s ON s.id = d.source_id
-                WHERE d.document_type = 'news' AND d.url IS NOT NULL
-                ORDER BY d.created_at;
-                """
-            )
+            if source_filter:
+                cur.execute(
+                    """
+                    SELECT d.id, d.url, d.published_at, d.title, s.name
+                    FROM documents d
+                    JOIN sources s ON s.id = d.source_id
+                    WHERE d.document_type = 'news' AND d.url IS NOT NULL AND s.name = %s
+                    ORDER BY d.created_at;
+                    """,
+                    (source_filter,),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT d.id, d.url, d.published_at, d.title, s.name
+                    FROM documents d
+                    JOIN sources s ON s.id = d.source_id
+                    WHERE d.document_type = 'news' AND d.url IS NOT NULL
+                    ORDER BY d.created_at;
+                    """
+                )
             rows = cur.fetchall()
 
+        if limit is not None:
+            rows = rows[:limit]
+
         mode_label = "실제 반영 모드" if apply_changes else "dry-run (미리보기만, DB는 안 건드림)"
-        print(f"검사 대상 news 문서 {len(rows)}건 — {mode_label}")
+        scope_label = f" (source={source_filter!r})" if source_filter else ""
+        print(f"검사 대상 news 문서 {len(rows)}건{scope_label} — {mode_label}")
 
         changed = 0
         unchanged = 0

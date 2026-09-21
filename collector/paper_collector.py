@@ -666,6 +666,31 @@ def _arxiv_short_id(raw_id: str) -> str:
     return tail.split("v")[0] if "v" in tail else tail
 
 
+_ARXIV_ID_YYMM_RE = re.compile(r"^(\d{2})(\d{2})\.\d{4,5}")
+
+
+def _arxiv_id_month_date(raw_id_or_url: str) -> date | None:
+    """arXiv 새 형식 ID(YYMM.NNNNN)에서 연-월만 뽑아 그 달 1일로 반환.
+    2026-09-21 추가: arXiv RSS 응답에 published_parsed/updated_parsed가 둘 다 없는 경우가
+    실측으로 확인됨(예: cs.SD/eess.AS 피드 다수 — 실제 게재월(예: 2026-01)이 수집일(예:
+    2026-09)로 통째로 잘못 저장되던 사고로 발견). news_collector.py의 URL 날짜 폴백과 같은
+    발상 — 피드가 주는 날짜 필드를 못 믿을 때, 정확한 일자는 몰라도 ID 자체에 항상 박혀있는
+    연-월만이라도 건지는 최후의 폴백. day=1로 고정하는 건 부정확하지만(정확한 일자는 알 수
+    없음), 몇 달씩 틀린 수집일보다는 훨씬 낫다는 판단 — KCI 경로(_kci_parse_date 등)가 이미
+    쓰는 것과 같은 "연-월만 있으면 1일로" 패턴."""
+    short_id = _arxiv_short_id(raw_id_or_url)
+    m = _ARXIV_ID_YYMM_RE.match(short_id)
+    if not m:
+        return None
+    yy, mm = int(m.group(1)), int(m.group(2))
+    if not (1 <= mm <= 12):
+        return None
+    try:
+        return date(2000 + yy, mm, 1)
+    except ValueError:
+        return None
+
+
 _OPENALEX_ARXIV_DOI_RE = re.compile(r"48550/arxiv\.([a-z0-9.]+)", re.IGNORECASE)
 
 
@@ -704,15 +729,25 @@ def _openalex_work_to_row(work: dict, category: str, seen_arxiv_ids: set[str], l
     if arxiv_id and arxiv_id in seen_arxiv_ids:
         return None  # arXiv에서 이미 수집한 프리프린트와 중복
 
-    published_at = date.today()
+    published_at = None
     pub_date = work.get("publication_date")
     if pub_date:
         try:
             published_at = datetime.strptime(pub_date, "%Y-%m-%d").date()
         except ValueError:
             pass
-    elif work.get("publication_year"):
+    if published_at is None and work.get("publication_year"):
+        # publication_date가 없고 publication_year만 있으면 그 해 1월 1일로(일자는 모름) —
+        # 실측상 OpenAlex는 둘 중 하나는 거의 항상 줌(same-day-as-수집일 0/213으로 확인됨).
         published_at = date(int(work["publication_year"]), 1, 1)
+    if published_at is None:
+        # 2026-09-21 추가: 위 두 필드가 다 없는 극히 드문 경우도 arXiv/뉴스와 동일하게 조용히
+        # 넘기지 않고 경고 로그를 남김 — 지금까지는 발생 안 했지만 재발 시 바로 알아채려는 목적.
+        published_at = date.today()
+        print(
+            f"[paper_collector] OpenAlex work {work.get('id') or work.get('doi')} — "
+            "게재일 정보 없음(publication_date/publication_year 둘 다 없음), 수집일로 대체합니다."
+        )
 
     authors = (
         ", ".join(
@@ -758,12 +793,23 @@ def collect() -> list[dict]:
                 seen_arxiv_ids.add(arxiv_id)
                 seen_arxiv_ids.add(_arxiv_short_id(arxiv_id))
 
-                published_at = date.today()
+                published_at = None
                 if entry.get("published"):
                     try:
                         published_at = datetime.strptime(entry.published[:10], "%Y-%m-%d").date()
                     except ValueError:
                         pass
+                if published_at is None:
+                    # 2026-09-21 추가: 검색 API는 지금까지 실측상 entry.published가 항상 있었지만
+                    # (RSS 경로와 달리), 혹시 없는 경우에도 조용히 수집일로 떨어지지 않도록 RSS
+                    # 경로와 동일한 방어선(ID 연-월 폴백 + 경고 로그)을 여기도 맞춰둠.
+                    published_at = _arxiv_id_month_date(arxiv_id)
+                if published_at is None:
+                    published_at = date.today()
+                    print(
+                        f"[paper_collector] {arxiv_id} — 게재일 추출 실패(entry.published/ID 전부 실패), "
+                        "수집일로 대체합니다."
+                    )
 
                 authors = ", ".join(a.get("name", "") for a in entry.get("authors", [])) or None
 
@@ -812,12 +858,29 @@ def collect() -> list[dict]:
 
             seen_arxiv_ids.add(short_id)
 
-            published_at = date.today()
-            if entry.get("published_parsed"):
-                try:
-                    published_at = date(*entry.published_parsed[:3])
-                except (TypeError, ValueError):
-                    pass
+            # 2026-09-21 수정: arXiv RSS(cs.SD/eess.AS) 응답에서 published_parsed가 실측상
+            # 거의 항상 비어있는 것으로 확인됨 — 조용히 date.today()로 떨어져서 실제 게재월이
+            # 몇 달씩 틀린 채로 저장되던 사고 발견(예: 2026-01 게재 논문이 2026-09 수집일로
+            # 저장됨). news_collector.py의 RSS 폴백 수정과 동일한 순서로: published_parsed ->
+            # updated_parsed(혹시 있을 Atom 스타일 필드) -> arXiv ID의 연-월(_arxiv_id_month_date,
+            # 일자는 모르지만 최소한 연-월은 정확) -> 그래도 없으면 수집일 + 경고 로그.
+            published_at = None
+            for date_field in ("published_parsed", "updated_parsed"):
+                parsed_time = entry.get(date_field)
+                if parsed_time:
+                    try:
+                        published_at = date(*parsed_time[:3])
+                        break
+                    except (TypeError, ValueError):
+                        continue
+            if published_at is None:
+                published_at = _arxiv_id_month_date(short_id)
+            if published_at is None:
+                published_at = date.today()
+                print(
+                    f"[paper_collector] {link} — 게재일 추출 실패(published_parsed/updated_parsed/ID 전부 실패), "
+                    "수집일로 대체합니다."
+                )
 
             authors = entry.get("author") or None
 

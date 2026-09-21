@@ -21,6 +21,7 @@ _extract_body()로 본문을 직접 긁어옴 — RSS 경로와 완전히 같은
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import time
@@ -132,8 +133,28 @@ NEWSAPI_INTERVAL_SEC = 1  # 무료 플랜 100req/day라 요청 자체를 아껴 
 # 한국어 쿼리로만 유도 — 그래서 영어 기사가 섞여 들어올 수 있고, 실제 언어는 _detect_language()로
 # 기사 본문을 보고 다시 판별해서 채움(안 그러면 번역 단계가 엉뚱하게 스킵되는 문제가 생김).
 NEWSAPI_QUERIES: dict[str, list[tuple[str, str | None]]] = {
-    "저작권": [("AI music copyright lawsuit", "en"), ("인공지능 음악 저작권", None)],
-    "창작자성": [("AI generated music authorship", "en"), ("인공지능 창작물 저작자", None)],
+    "저작권": [
+        ("AI music copyright lawsuit", "en"),
+        ("인공지능 음악 저작권", None),
+        # 2026-09-17: "Concord Music Group v. Anthropic"(2023년 제소, UMG/ABKCO 공동)처럼
+        # 랜드마크 사건 자체를 직접 겨냥한 쿼리 — 일반 카테고리 쿼리("AI music copyright
+        # lawsuit")만으로는 이런 특정 사건의 1차 기사가 안 걸리고, 나중에 터진 후속 소송
+        # 기사 안에 배경으로만 짧게 언급되는 형태로만 코퍼스에 들어오는 문제가 있었음
+        # (rag/tests에서 확인). NewsAPI 무료 플랜은 최근 ~1개월 기사만 검색되므로 2023년
+        # 원문 기사 자체는 이 쿼리로도 못 얻을 수 있음 — 과거 사건은
+        # seed_concord_case_document.py 같은 수동 시드로 보강하고, 이 쿼리는 향후 나오는
+        # 후속 보도(판결/화해 등)를 놓치지 않기 위한 용도.
+        ("Concord Music Group Anthropic lawsuit", "en"),
+        ("Universal Music Publishing ABKCO Anthropic", "en"),
+    ],
+    "창작자성": [
+        ("AI generated music authorship", "en"),
+        ("인공지능 창작물 저작자", None),
+        # 2026-09-19 추가: 창작자성 카테고리 보강 요청 — US Copyright Office의 공식 authorship
+        # 가이드라인/판단 보도까지 직접 겨냥(위 저작권 카테고리의 "랜드마크 사건 직접 쿼리"와
+        # 같은 이유).
+        ("US Copyright Office AI authorship", "en"),
+    ],
     "음성복제": [("AI voice cloning music", "en"), ("AI 음성복제 논란", None)],
     "AI작곡": [("Suno Udio AI music generator", "en"), ("생성형 AI 작곡", None)],
 }
@@ -162,8 +183,12 @@ NAVER_NEWS_INTERVAL_SEC = 1  # 무료 한도 보호용 — 쿼리 8개면 초 �
 
 # 검색어는 한국어로 — NAVER는 한국 매체 전용이라 한국어 쿼리가 훨씬 잘 맞음.
 NAVER_NEWS_QUERIES: dict[str, list[str]] = {
-    "저작권": ["AI 음악 저작권", "생성형 AI 음악 저작권 침해"],
-    "창작자성": ["AI 창작물 저작자", "인공지능 창작 주체성"],
+    "저작권": [
+        "AI 음악 저작권",
+        "생성형 AI 음악 저작권 침해",
+        "콩코드뮤직그룹 앤스로픽",  # 위 NEWSAPI_QUERIES 주석 참고 — 랜드마크 사건 직접 쿼리
+    ],
+    "창작자성": ["AI 창작물 저작자", "인공지능 창작 주체성", "AI 저작물 인간 창작 기여"],
     "음성복제": ["AI 음성복제", "딥페이크 보이스 논란"],
     "AI작곡": ["생성형 AI 작곡", "수노 유디오 AI 음악"],
 }
@@ -234,17 +259,152 @@ def _fetch_newsapi(query: str, language: str | None) -> list[dict]:
     return data.get("articles", [])
 
 
-def _extract_body(url: str) -> str:
-    """기사 본문만 추출 — 광고/메뉴/스크립트는 clean_html.strip_noise_tags()로 먼저 제거.
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}")
+
+
+def _parse_iso_like_date(raw: str | None) -> date | None:
+    """meta 태그/JSON-LD에서 나오는 "2023-12-13T09:00:00+09:00" 류의 ISO 8601(비슷한) 문자열에서
+    날짜만 뽑아냄. 초/타임존까지 파싱할 필요는 없고(우리가 저장하는 건 DATE 컬럼), 앞 10자리
+    "YYYY-MM-DD"만 있으면 충분 — 사이트마다 초/타임존 표기가 제각각이라 datetime.fromisoformat()로
+    엄격하게 파싱하면 실패하는 경우가 많아서 정규식으로 앞부분만 잘라 쓰는 쪽이 더 안정적임."""
+    if not raw:
+        return None
+    raw = raw.strip()
+    m = _ISO_DATE_RE.match(raw)
+    if not m:
+        return None
+    try:
+        return date.fromisoformat(m.group(0))
+    except ValueError:
+        return None
+
+
+# 2026-09-19 추가: NewsAPI의 publishedAt이 실제로는 NewsAPI 자체의 크롤링/색인 시각을 반영하는
+# 경우가 확인됨(NMPA 기사 — 실제 게재일 2023-12-13인데 published_at이 수집 당일로 저장된 사고).
+# NewsAPI/RSS/네이버가 주는 날짜를 무조건 신뢰하지 않고, 기사 원문 페이지 자체의 메타데이터에서
+# 게재일을 직접 뽑아서 있으면 그걸 최우선으로 씀. 아래 우선순위로 확인(매체마다 쓰는 태그가 달라서
+# 여러 후보를 순서대로 시도) — 흔히 쓰이는 것부터.
+_META_DATE_ATTRS: list[tuple[str, str]] = [
+    ("property", "article:published_time"),
+    ("property", "og:article:published_time"),
+    ("name", "article:published_time"),
+    ("name", "publish-date"),
+    ("name", "publishdate"),
+    ("name", "sailthru.date"),
+    ("name", "date"),
+    ("name", "pubdate"),
+    ("itemprop", "datePublished"),
+]
+_JSONLD_DATE_KEYS = ("datePublished", "dateCreated", "uploadDate")
+
+
+def _extract_page_published_date(soup: BeautifulSoup) -> date | None:
+    """페이지 자체(<meta>/<time>/JSON-LD)에서 실제 게재일을 뽑아냄. RSS/API가 주는 날짜보다
+    이쪽을 우선시함 — 주의: 이 함수는 반드시 strip_noise_tags(soup) 호출 *이전*에 실행해야 함.
+    strip_noise_tags가 <script> 태그를 통째로 decompose()해버려서, 그 뒤에 부르면 JSON-LD
+    (<script type="application/ld+json">)가 이미 사라지고 없음."""
+    for attr, value in _META_DATE_ATTRS:
+        tag = soup.find("meta", attrs={attr: value})
+        if tag:
+            parsed = _parse_iso_like_date(tag.get("content"))
+            if parsed:
+                return parsed
+
+    time_tag = soup.find("time", attrs={"datetime": True})
+    if time_tag:
+        parsed = _parse_iso_like_date(time_tag.get("datetime"))
+        if parsed:
+            return parsed
+
+    for script_tag in soup.find_all("script", attrs={"type": "application/ld+json"}):
+        raw_json = script_tag.string
+        if not raw_json:
+            continue
+        try:
+            data = json.loads(raw_json)
+        except (ValueError, TypeError):
+            continue
+        # JSON-LD는 단일 객체, 배열, 또는 "@graph" 안에 여러 객체가 들어있는 등 형태가 다양해서
+        # 후보 객체 목록을 만들어 공통 처리.
+        candidates: list[dict] = []
+        if isinstance(data, dict):
+            candidates.append(data)
+            graph = data.get("@graph")
+            if isinstance(graph, list):
+                candidates.extend(item for item in graph if isinstance(item, dict))
+        elif isinstance(data, list):
+            candidates.extend(item for item in data if isinstance(item, dict))
+
+        for candidate in candidates:
+            for key in _JSONLD_DATE_KEYS:
+                parsed = _parse_iso_like_date(candidate.get(key))
+                if parsed:
+                    return parsed
+
+    # 2026-09-21 추가: 위 _META_DATE_ATTRS 하드코딩 목록에 없는 이름의 meta 태그를 쓰는
+    # 사이트 대응(실측: Digital Music News — 위 세 가지 방법 다 실패해서 매번 수집일로
+    # 잘못 저장되던 게 발견됨). 정확한 태그 이름을 사이트마다 추가하는 대신, 속성 이름에
+    # "date"/"time"/"publish"가 들어간 모든 meta 태그를 느슨하게 훑어서 ISO 날짜로 파싱되는
+    # 첫 값을 채택 — 사이트를 몰라도 커버되는 휴리스틱. 위 정확 매칭 목록을 먼저 시도하는
+    # 이유는 순서 모호성(예: "modified"용 태그가 "published"보다 먼저 걸릴 위험)을 줄이기
+    # 위함이고, 여기는 그게 다 실패했을 때만 쓰는 두 번째 방어선.
+    for tag in soup.find_all("meta"):
+        attr_val = (tag.get("property") or tag.get("name") or tag.get("itemprop") or "").lower()
+        if any(kw in attr_val for kw in ("date", "time", "publish")):
+            parsed = _parse_iso_like_date(tag.get("content"))
+            if parsed:
+                return parsed
+
+    return None
+
+
+# 2026-09-21 추가: meta/time/JSON-LD가 전부 실패했을 때 마지막으로 시도하는 URL 기반 폴백 —
+# 워드프레스 계열 CMS(Digital Music News 등)는 게시물 URL 경로 자체에 "/YYYY/MM/DD/slug"
+# 형태로 게재일이 박혀있는 경우가 흔함. 특정 매체를 하드코딩하지 않아도 되는 일반적인 패턴이라
+# 사이트 이름을 몰라도 커버됨. 연/월/일 값 범위를 체크(월 1~12, 일 1~31)해서, 우연히 숫자 3개가
+# 슬래시로 구분된 다른 경로(상품/기사 번호 등)를 날짜로 오인할 위험을 줄임.
+_URL_DATE_RE = re.compile(r"/(\d{4})/(\d{2})/(\d{2})/")
+
+
+def _extract_url_date(url: str) -> date | None:
+    path = urlparse(url).path
+    m = _URL_DATE_RE.search(path)
+    if not m:
+        return None
+    year, month, day = (int(g) for g in m.groups())
+    if not (1 <= month <= 12 and 1 <= day <= 31):
+        return None
+    try:
+        return date(year, month, day)
+    except ValueError:
+        return None
+
+
+def _extract_body(url: str) -> tuple[str, date | None]:
+    """기사 본문 + 페이지에서 뽑은 게재일(date | None)을 함께 반환.
+    광고/메뉴/스크립트는 clean_html.strip_noise_tags()로 먼저 제거.
     2026-09-16: <article> 태그 안쪽에 class로만 박혀있는 카테고리 메뉴/바이라인/공유 위젯
-    (예: 데일리안)은 태그 기반 제거로 못 걸러져서 strip_boilerplate_lines()로 한 번 더 정리."""
+    (예: 데일리안)은 태그 기반 제거로 못 걸러져서 strip_boilerplate_lines()로 한 번 더 정리.
+    2026-09-19: strip_noise_tags()가 <script> 태그를 지워버리므로, 페이지 게재일 추출
+    (_extract_page_published_date)은 반드시 그 호출 전에 먼저 실행.
+    2026-09-21: soup 기반 추출이 다 실패하면 URL 패턴 폴백(_extract_url_date)까지 시도 —
+    둘 다 "페이지/URL 자체에서 나온 신호"라 RSS/API가 주는 날짜보다 우선시할 가치가 있어서
+    같은 page_date 값으로 합쳐서 반환(호출부 코드를 안 바꿔도 되게)."""
     resp = requests.get(url, timeout=10, headers=_BROWSER_HEADERS)
     resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "html.parser")
+    # 2026-09-19: resp.text 대신 resp.content(원본 바이트)를 넘김 — 서버가 응답 헤더에
+    # charset을 안 밝히면 requests가 ISO-8859-1로 잘못 추측해서 UTF-8 페이지의 스마트
+    # 따옴표/줄표(’/–/— 등)가 "â" 같은 글자로 깨지는 버그가 실제로 확인됨(Music Business
+    # Worldwide 기사에서 "Dua Lipaâs" 식으로 깨짐). resp.content를 넘기면 BeautifulSoup이
+    # 자체 인코딩 감지(UnicodeDammit — meta charset/BOM 등 실제 콘텐츠를 보고 판단)를 써서
+    # 훨씬 안정적으로 맞춤.
+    soup = BeautifulSoup(resp.content, "html.parser")
+    page_date = _extract_page_published_date(soup) or _extract_url_date(url)
     strip_noise_tags(soup)
     article = soup.find("article") or soup.find("body")
     text = article.get_text(separator="\n", strip=True) if article else ""
-    return normalize_whitespace(strip_boilerplate_lines(text))
+    content = normalize_whitespace(strip_boilerplate_lines(text))
+    return content, page_date
 
 
 def _load_known_urls() -> set[str]:
@@ -286,7 +446,7 @@ def collect() -> list[dict]:
                 continue
 
             try:
-                content = _extract_body(link)
+                content, page_date = _extract_body(link)
             except Exception as e:  # noqa: BLE001 — 수집 단계에서는 개별 실패를 건너뛰고 계속 진행
                 print(f"[news_collector] {link} 수집 실패: {e}")
                 continue
@@ -296,12 +456,31 @@ def collect() -> list[dict]:
                 continue
 
             seen_urls.add(link)
-            published_at = date.today()
-            if entry.get("published_parsed"):
-                try:
-                    published_at = date(*entry.published_parsed[:3])
-                except (TypeError, ValueError):
-                    pass
+            # 2026-09-19: 페이지 자체 메타데이터/URL에서 뽑은 게재일(page_date)을 최우선으로
+            # 씀 — RSS의 published_parsed도 대체로 신뢰할 만하지만, 피드 자체가 재발행/재색인
+            # 시각을 줄 수 있어서 페이지 원본 쪽이 더 정확함.
+            # 2026-09-21: published_parsed 하나만 보다가, 그 필드가 없는 Atom 계열 피드 등을
+            # 대응하기 위해 updated_parsed도 순서대로 시도하도록 추가. 실측(Digital Music News)
+            # 결과 이 피드는 page_date/published_parsed/updated_parsed가 전부 실패해서 매번
+            # 조용히 수집일로 대체되고 있었음이 확인됨 — 그래서 셋 다 실패하는 마지막 경우는
+            # 더 이상 조용히 넘기지 않고 경고를 남겨서, 날짜가 통째로 틀리는 사고를 나중에
+            # 스크린샷으로 우연히 발견하는 대신 로그로 바로 알아챌 수 있게 함.
+            published_at = page_date
+            if published_at is None:
+                for date_field in ("published_parsed", "updated_parsed"):
+                    parsed_time = entry.get(date_field)
+                    if parsed_time:
+                        try:
+                            published_at = date(*parsed_time[:3])
+                            break
+                        except (TypeError, ValueError):
+                            continue
+            if published_at is None:
+                published_at = date.today()
+                print(
+                    f"[news_collector] {link} — 게재일 추출 실패(meta/URL/RSS 전부 실패), "
+                    "수집일로 대체합니다. 이 매체는 날짜 추출 로직 보강이 필요할 수 있습니다."
+                )
 
             results.append(
                 {
@@ -338,7 +517,7 @@ def collect() -> list[dict]:
                         continue
 
                     try:
-                        content = _extract_body(url)
+                        content, page_date = _extract_body(url)
                     except Exception as e:  # noqa: BLE001
                         print(f"[news_collector] {url} 수집 실패: {e}")
                         continue
@@ -350,6 +529,19 @@ def collect() -> list[dict]:
                     seen_urls.add(url)
                     title = article.get("title") or ""
                     source_label = (article.get("source") or {}).get("name") or "알 수 없음"
+                    # 2026-09-19: NewsAPI의 publishedAt은 실제로는 NewsAPI 자체의 크롤링/색인
+                    # 시각을 반영하는 경우가 확인됨(NMPA 기사 사고 — 실제 게재일 2023-12-13인데
+                    # published_at이 수집 당일로 잘못 저장됨). 페이지에서 직접 뽑은 page_date가
+                    # 있으면 그걸 우선 쓰고, 없을 때만 NewsAPI가 준 값으로 폴백.
+                    resolved_published_at = page_date or _parse_newsapi_date(article.get("publishedAt"))
+                    if resolved_published_at is None:
+                        # 2026-09-21 추가: page_date도 없고 NewsAPI의 publishedAt 파싱도 실패한
+                        # 경우 — RSS 쪽과 동일하게 조용히 넘기지 않고 경고를 남김.
+                        resolved_published_at = date.today()
+                        print(
+                            f"[news_collector] {url} — 게재일 추출 실패(meta/URL/NewsAPI 전부 실패), "
+                            "수집일로 대체합니다."
+                        )
                     results.append(
                         {
                             "title": title,
@@ -358,7 +550,7 @@ def collect() -> list[dict]:
                             "author": article.get("author"),
                             "category": category,
                             "document_type": "news",
-                            "published_at": _parse_newsapi_date(article.get("publishedAt")),
+                            "published_at": resolved_published_at,
                             "language": _detect_language(title + " " + content[:200]),
                             "source_name": f"NewsAPI: {source_label}",
                         }
@@ -389,7 +581,7 @@ def collect() -> list[dict]:
                         continue
 
                     try:
-                        content = _extract_body(url)
+                        content, page_date = _extract_body(url)
                     except Exception as e:  # noqa: BLE001
                         print(f"[news_collector] {url} 수집 실패: {e}")
                         continue
@@ -401,6 +593,16 @@ def collect() -> list[dict]:
                     seen_urls.add(url)
                     title = _clean_naver_text(item.get("title", ""))
                     domain = urlparse(url).netloc.replace("www.", "")
+                    # 2026-09-19: 페이지 자체 메타데이터에서 뽑은 page_date를 최우선으로 쓰고,
+                    # 없을 때만 네이버 검색 API의 pubDate로 폴백 (NewsAPI 쪽과 동일한 정책).
+                    resolved_published_at = page_date or _parse_naver_date(item.get("pubDate"))
+                    if resolved_published_at is None:
+                        # 2026-09-21 추가: 다른 두 경로와 동일하게 조용히 넘기지 않고 경고를 남김.
+                        resolved_published_at = date.today()
+                        print(
+                            f"[news_collector] {url} — 게재일 추출 실패(meta/URL/네이버pubDate 전부 실패), "
+                            "수집일로 대체합니다."
+                        )
                     results.append(
                         {
                             "title": title,
@@ -409,7 +611,7 @@ def collect() -> list[dict]:
                             "author": None,
                             "category": category,
                             "document_type": "news",
-                            "published_at": _parse_naver_date(item.get("pubDate")),
+                            "published_at": resolved_published_at,
                             "language": "ko",
                             "source_name": f"네이버뉴스: {domain}",
                         }
