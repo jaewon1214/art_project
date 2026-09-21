@@ -50,6 +50,21 @@ rerank_by_relevance()(rag/retrieval/relevance_rerank.py)를 통해 최소 관련
 파이프라인 순서: 최소관련성필터(_passes) -> LLM 재판정(rerank_by_relevance) ->
 유형다양성선별(_select_diverse, 여기서 top_k로 자름).
 
+2026-09-21 (3차): category 하드 필터로 인한 근거 고갈 문제 수정. category가 주어지면
+vector_search/keyword_search/exact_match_search 세 채널 모두 SQL 단계에서
+"d.category = %s"(metadata_filter.build_filter)로 정확히 일치하는 문서만 후보가 되는데,
+실측(2026-09-21, "한국 내 AI 창작물의 저작자 인정 기준" 논문 재검토)으로 확인한 문제: 수집
+시점 카테고리 태깅이 4개 버킷(저작권/창작자성/음성복제/AI작곡)으로 성기게 나뉘다 보니, 주제상
+명백히 관련 있는 문서 다수(예: 음저협 AI 음악 등록기준 기사 119건 중 117건)가 그 주제와 더
+좁게 대응하는 카테고리(예: '창작자성')가 아니라 더 넓은 인접 카테고리(예: '저작권')로 분류돼
+있어서, category로 필터링하면 코퍼스에 자료가 충분히 있어도(위 예시는 119건) SQL 단계에서
+이미 후보가 1~2건으로 고갈됨 — 위 (1)(2)의 다양성/재판정 로직은 이 SQL 필터보다 뒤에서
+동작하므로 아무리 개선해도 이 병목엔 영향을 못 준다. 그래서 category를 "하드 배제"가 아니라
+"우선순위"로 바꿈: category로 먼저 찾고, 그 결과(distinct 문서 기준)가 아래 후보 풀 크기에
+못 미치면 category 없이 한 번 더 검색해서 모자란 만큼만 보충한다(_merge_backfill). 이미
+category-일치 후보가 rank 앞자리를 그대로 유지하므로 RRF에서 자연히 우선순위를 갖고, 보충분은
+그 뒤로 이어붙는 것만 다르다 — category가 잘 맞을 때(넉넉한 경우)는 동작이 전혀 안 바뀐다.
+
 반환 형식(공통 규약):
 {
   "contexts": [
@@ -98,6 +113,24 @@ REQUIRE_CORROBORATION_MIN_ACTIVE_CHANNELS = 3
 # 여지를 남김) 필터링 이후에 top_k로 자른다.
 CANDIDATE_POOL_MIN = 20
 CANDIDATE_POOL_MULTIPLIER = 4
+
+
+def _merge_backfill(primary: list[dict], backfill: list[dict]) -> list[dict]:
+    """category로 찾은 primary 결과 뒤에, category 없이 다시 찾은 backfill 결과 중 primary에
+    이미 없는 chunk만 이어붙인다. backfill 쪽 rank는 primary 뒤로 재부여해서(원래 자기 쿼리
+    안에서의 순위를 그대로 쓰지 않음) category-일치 후보가 RRF 점수 계산에서 항상 우선하도록
+    한다 — category가 잘 맞아서 primary만으로 충분한 경우엔 이 함수가 호출조차 안 되므로
+    (search_context() 쪽 호출 조건 참고) 기존 동작에 영향이 없다."""
+    seen = {r["chunk_id"] for r in primary}
+    merged = list(primary)
+    next_rank = len(primary) + 1
+    for r in backfill:
+        if r["chunk_id"] in seen:
+            continue
+        seen.add(r["chunk_id"])
+        merged.append({**r, "rank": next_rank})
+        next_rank += 1
+    return merged
 
 
 def _select_diverse(candidates: list[dict], top_k: int) -> list[dict]:
@@ -209,6 +242,7 @@ def search_context(topic: str, category: str | None = None, top_k: int = 5) -> d
     MIN_SINGLE_CHANNEL_SCORE_BASELINE_ONLY(rank<=6 수준)로 완화된 단일채널 기준을 적용한다.
     """
     with get_connection() as conn:
+        query_embedding = None
         try:
             query_embedding = embed_texts([topic])[0]
             vec_results = vector_search(conn, query_embedding, category=category, top_k=50)
@@ -222,6 +256,29 @@ def search_context(topic: str, category: str | None = None, top_k: int = 5) -> d
 
         # 필터링으로 일부가 걸러질 걸 감안해서 top_k보다 넉넉한 후보 풀을 RRF로 먼저 뽑는다.
         candidate_pool = max(top_k * CANDIDATE_POOL_MULTIPLIER, CANDIDATE_POOL_MIN)
+
+        # 2026-09-21 (3차): category 하드 필터로 인한 근거 고갈 방지(위 모듈 docstring 참고).
+        # category 일치 후보(distinct 문서 기준)가 candidate_pool보다 적으면, category 없이
+        # 한 번 더 검색해서 모자란 만큼만 보충한다 — category가 잘 맞아서 이미 충분하면
+        # (일반적인 경우) 여기서 더 할 일이 없어 기존 동작 그대로.
+        if category is not None:
+            distinct_docs = {r["document_id"] for r in vec_results + kw_results + exact_results}
+            if len(distinct_docs) < candidate_pool:
+                print(
+                    f"[context_builder] category={category!r} 필터 후 후보 문서가 "
+                    f"{len(distinct_docs)}건뿐(<{candidate_pool}) — category 없이 보충 검색합니다."
+                )
+                if query_embedding is not None:
+                    vec_results = _merge_backfill(
+                        vec_results, vector_search(conn, query_embedding, category=None, top_k=50)
+                    )
+                kw_results = _merge_backfill(
+                    kw_results, keyword_search(conn, topic, category=None, top_k=50)
+                )
+                exact_results = _merge_backfill(
+                    exact_results, exact_match_search(conn, topic, category=None, top_k=30)
+                )
+
         # exact_results를 두 번 넣어서 RRF 가중치를 강하게 줌(위 모듈 docstring 참고) — channel_count는
         # 동일 리스트 객체 기준으로 세므로 이 이중 전달이 채널 수를 부풀리진 않음(hybrid_rrf.py 참고).
         fused_candidates = reciprocal_rank_fusion(
