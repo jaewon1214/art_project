@@ -1,22 +1,27 @@
-from typing import Literal
-
 from pydantic import BaseModel, Field
 
 
 class GenerateRequest(BaseModel):
-    input_type: Literal["topic", "title"] = Field(
-        default="topic",
+    title: str | None = Field(
+        default=None,
+        min_length=3,
+        max_length=500,
         description=(
-            "topic이면 입력을 연구 주제로 사용하고, "
-            "title이면 입력값을 최종 논문 제목으로 그대로 사용합니다."
+            "최종 논문에 그대로 사용할 제목입니다. "
+            "생략하면 기존 방식처럼 제목을 자동 생성합니다."
         ),
+        examples=["생성형 AI 음악의 음성복제와 저작권에 관한 연구"],
     )
 
     topic: str = Field(
         ...,
         min_length=3,
-        max_length=500,
-        examples=["생성형 AI 음악의 음성복제와 저작권"],
+        max_length=1000,
+        description=(
+            "근거 검색, Transformer 초안 생성, "
+            "최종 논문 내용 구성에 사용할 연구 주제입니다."
+        ),
+        examples=["AI 음성복제 기술과 음악 창작자의 권리 보호 문제"],
     )
 
     length: int = Field(
