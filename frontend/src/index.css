@@ -1,6 +1,5 @@
 :root {
   font-family:
-    Inter,
     Pretendard,
     "Noto Sans KR",
     system-ui,
@@ -9,9 +8,8 @@
     "Segoe UI",
     sans-serif;
 
-  color: #172033;
-  background: #f5f7fb;
-
+  color: #20242a;
+  background: #f5f4f0;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -25,7 +23,7 @@
 html {
   min-width: 320px;
   min-height: 100%;
-  background: #f5f7fb;
+  background: #f5f4f0;
 }
 
 body {
@@ -46,10 +44,10 @@ button {
 
 textarea::placeholder,
 input::placeholder {
-  color: #a8b0bd;
+  color: #9ca0a5;
 }
 
 ::selection {
-  background: #dbeafe;
-  color: #1e3a8a;
+  background: #dfe5ea;
+  color: #182737;
 }
