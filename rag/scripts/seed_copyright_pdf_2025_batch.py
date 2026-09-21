@@ -22,7 +22,8 @@ seed_copyright_pdf_hwp_documents.py와 동일한 패턴(Claude가 PDF 원문을 
      AI 음악 변형 기술 분류, AI 음악 변형 기술 비즈니스 모델(B2C 구독/B2B 맞춤형), OpenAI
      MuseNet/Suno/Udio/Supertone/YouTube 리믹스/NVIDIA Fugatto 등 기업별 개발 사례를 다룸.
 
-실행: python seed_copyright_pdf_2025_batch.py  (secondpj 루트에서, .venv 활성화 상태)
+실행: python -m rag.scripts.seed_copyright_pdf_2025_batch  (레포 루트에서, .venv 활성화 상태 —
+rag/scripts/의 다른 backfill_*.py 스크립트들과 동일하게 -m 모듈 방식으로 실행)
 문서 2건에 대해 순서대로 {"status": "inserted"/"duplicate"/"near_duplicate"/"irrelevant", ...}가 출력됨.
 """
 from datetime import date

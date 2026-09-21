@@ -24,7 +24,31 @@ def strip_noise_tags(soup: BeautifulSoup) -> None:
         tag.decompose()
 
 
+# 2026-09-19 추가: livemint.com 등 일부 사이트는 본문 일부(기자 소개 문단 등)가 실제 <br> DOM
+# 태그가 아니라 API/JSON 응답에 박혀있던 리터럴 "<br>" 문자열 그대로 내려와서, BeautifulSoup의
+# 태그 파싱을 안 거치고 텍스트로 그대로 남는 경우가 확인됨 — strip_noise_tags()는 진짜 DOM
+# 태그만 지우므로 이런 리터럴 문자열은 못 잡음. 정상 기사 본문에 "<br>" 문자열 자체가 그대로
+# 쓰일 일은 없다고 보고 텍스트 레벨에서 공백으로 치환.
+_LITERAL_BR_TAG_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
+
+# 2026-09-19 추가(감사 2차): 연합뉴스/톱스타뉴스/한국일보/KOTRA/국방일보 등 국내 언론사 다수가
+# 기사 맨 끝에 "<저작권자(c) 연합뉴스, 무단 전재-재배포...>"/"<Copyright ⓒ 한국일보....>"
+# 형태로 저작권 고지를 꺾쇠(<>)로 감싸서 붙임 — 실제 HTML 태그가 아니라 그 매체가 관습적으로
+# 쓰는 표기라 strip_noise_tags()로는 못 잡고, 텍스트에 "<...>" 형태로 그대로 남음. 이 마커는
+# 종종 앞뒤의 바이라인/관련기사 목록과 한 줄에 뒤섞여 있어서(문장부호 없이 끝나는 조각들이
+# _reflow_fragmented_lines()에서 다음 줄과 이어붙기 때문) 줄 단위 필터로는 못 골라내서,
+# normalize_whitespace()에서 리터럴 <br>과 같은 방식으로 텍스트 레벨에서 곧장 제거함 — 15개
+# 이상의 서로 다른 매체에서 공통으로 관찰된 "<...Copyright/저작권.../무단전재...>" 패턴이라
+# 매체별로 따로 등록하지 않고 하나의 일반 패턴으로 잡음.
+_BRACKETED_COPYRIGHT_FOOTER_RE = re.compile(
+    r"<[^<>]{0,80}(?:Copyright|저작권|무단\s?전재)[^<>]{0,120}>",
+    re.IGNORECASE,
+)
+
+
 def normalize_whitespace(text: str) -> str:
+    text = _LITERAL_BR_TAG_RE.sub(" ", text)
+    text = _BRACKETED_COPYRIGHT_FOOTER_RE.sub(" ", text)
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
@@ -103,6 +127,17 @@ _PHOTO_CAPTION_RE = re.compile(
     r"^\[\s*사진\s*[:：]?\s*[^\[\]\n]{0,80}\]\s*(◆.{0,40})?$"
 )
 
+# 2026-09-19 추가: 네이버뉴스로 연동된 일부 사이트(newsen.com 등)에서, 본문 앞에 "관련기사"
+# 위젯이 자바스크립트로 나중에 채워지기 전 자리표시자였던 "Loading..." 문자열이 그대로
+# 텍스트로 딸려 들어오는 경우가 실측 확인됨. 실제 기사 문장에 이 정확한 형태가 나올 일은 없음.
+_LOADING_PLACEHOLDER_RE = re.compile(r"^Loading\.\.\.$")
+
+# 2026-09-19 추가(감사 2차): inthenews.co.kr류 일부 사이트는 "한국어 English 中文 日本語
+# ... news is the result of applying Google Translate. <매체명> is not responsible for the
+# content of ... news." 형태의 자동번역 안내/면책 문구를 기사에 끼워 넣음 — 실제 기사 내용과
+# 무관한 사이트 UI 문구. 매체명 부분은 사이트마다 달라서 그 앞의 고정 문구만으로 잡음.
+_TRANSLATION_DISCLAIMER_RE = re.compile(r"^.{0,60}is the result of applying Google Translate\.")
+
 _BOILERPLATE_LINE_PATTERNS = [
     _BYLINE_EMAIL_RE,
     _DATE_BANNER_RE,
@@ -112,7 +147,38 @@ _BOILERPLATE_LINE_PATTERNS = [
     _ARTICLE_NAV_RE,
     _PHOTO_CAPTION_RE,
     _BOARD_FIELD_LABEL_RE,
+    _LOADING_PLACEHOLDER_RE,
+    _TRANSLATION_DISCLAIMER_RE,
 ]
+
+# 2026-09-19 추가: "Loading..." 뒤에 따라오는 "관련기사/인기기사" 사이드바 위젯 항목들은
+# 대부분 "이름, 자극적인 문구…" 형태의 연예 가십 헤드라인이라 하트 기호(♥)가 유독 자주
+# 섞여 나옴(실측: newsen.com). 이 프로젝트 주제(생성형 AI·음악저작권) 기사 본문에 ♥ 기호가
+# 정상적으로 쓰일 일은 사실상 없다고 보고, 이 기호가 포함된 줄은 위젯 잡음으로 간주해 제거.
+# (같은 위젯의 ♥ 없는 줄까지 전부 잡진 못하지만, 나머지는 각 문서 재수집 시 개별 확인.)
+_HEART_SYMBOL = "♥"
+
+# 2026-09-19 추가: "최신 기사"/"주간 인기 기사"/"많이 본 뉴스" 같은 사이트 하단 관련기사·인기
+# 기사 위젯은, 마커 줄 하나만 지워서는 안 되고 그 뒤로 쭉 이어지는 기사 제목 목록+댓글창+
+# 등록번호 푸터까지 전부 잡음(실측: gamechosun.co.kr — 기사 본문이 끝난 뒤 "최신 기사" ->
+# 기사 제목 6개 -> "주간 인기 기사" -> 기사 제목 6개 -> 댓글위젯 -> "많이 본 뉴스" -> 순위
+# 목록 -> 인터뷰 위젯 -> "인터넷 신문 등록 번호" 푸터까지 쭉 이어짐). 이런 목록 항목은 실제
+# 기사 제목이라 문장부호(따옴표/말줄임표 등)가 섞여 있어서 _strip_menu_runs()의 "짧고 문장
+# 부호 없는 줄 연속" 기준에는 안 걸림 — 그래서 별도로, 이 마커들 중 하나가 줄 전체와 정확히
+# 일치하면 그 줄부터 문서 끝까지 통째로 잘라내는 방식으로 처리(마커 자체가 본문 문장으로
+# 우연히 등장할 가능성은 낮다고 보고 채택).
+_FOOTER_WIDGET_MARKERS = ("최신 기사", "주간 인기 기사", "많이 본 뉴스", "인터넷 신문 등록 번호")
+
+
+def _truncate_at_footer_widgets(text: str) -> str:
+    # startswith 기준 — "인터넷 신문 등록 번호"류는 같은 줄에 등록번호/발행인 등이 이어붙어
+    # 나와서(예: "인터넷 신문 등록 번호 : 서울 아00014 등록일 : ...") 완전일치로는 못 잡음.
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if any(stripped == marker or stripped.startswith(marker) for marker in _FOOTER_WIDGET_MARKERS):
+            return "\n".join(lines[:i])
+    return text
 
 _CATEGORY_TOKEN_RE = re.compile(r"^[가-힣A-Za-z0-9]{1,8}(/[가-힣A-Za-z0-9]{1,8})?$")
 
@@ -288,12 +354,22 @@ def strip_boilerplate_lines(text: str) -> str:
     실제로 한국저작권위원회 샘플로 이 순서 버그가 재현됨 — 대메뉴 블록 전체와 "제목"/
     "담당부서" 라벨이 안 지워지고 본문에 섞여 들어감. 그래서 순서를 "줄 단위 필터 →
     구조적 메뉴런 필터 → reflow"로 고정: 잡음이 아직 낱줄로 살아있을 때 먼저 걷어내고,
-    남은 진짜 문장만 마지막에 이어붙임."""
+    남은 진짜 문장만 마지막에 이어붙임.
+
+    2026-09-19 추가: 맨 처음에 _truncate_at_footer_widgets()로 "최신 기사"/"주간 인기 기사"
+    등 하단 관련기사 위젯 마커부터 문서 끝까지를 통째로 잘라냄(gamechosun.co.kr 등에서 확인
+    — 위젯 항목이 문장부호 섞인 "짧지 않은" 제목이라 _strip_menu_runs()로는 못 잡히므로 별도
+    처리). 다른 필터보다 먼저 해야 위젯 안의 항목들이 이후 필터에 걸려 오탐을 낼 여지도 같이
+    없앨 수 있음."""
+    text = _truncate_at_footer_widgets(text)
     kept = []
     for line in text.split("\n"):
         stripped = line.strip()
         if not stripped:
             kept.append(line)
+            continue
+        if _HEART_SYMBOL in stripped:
+            # 연예 가십 사이드바 위젯 항목 의심 줄(위 _HEART_SYMBOL 설명 참고) — 통째로 제거.
             continue
         if any(p.match(stripped) for p in _BOILERPLATE_LINE_PATTERNS):
             continue
