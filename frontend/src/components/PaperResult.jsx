@@ -1,5 +1,8 @@
 import PaperSection from "./PaperSection";
+import PdfDownloadButtons from "./PdfDownloadButtons";
 import ReferenceList from "./ReferenceList";
+
+const PAPER_ELEMENT_ID = "generated-paper-document";
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -52,45 +55,55 @@ function PaperResult({ paper }) {
   const referenceNumberMap = createReferenceNumberMap(references);
 
   return (
-    <article className="paper-result">
-      <header className="paper-header">
-        <h1>{paper.title}</h1>
-      </header>
+    <>
+      <PdfDownloadButtons
+        paperElementId={PAPER_ELEMENT_ID}
+        title={paper.title}
+      />
 
-      <section className="abstract-section">
-        <h2>초록</h2>
-        <p>
-          {formatPaperText(
-            paper.abstract,
-            referenceNumberMap
-          )}
-        </p>
-      </section>
+      <article
+        id={PAPER_ELEMENT_ID}
+        className="paper-result"
+      >
+        <header className="paper-header">
+          <h1>{paper.title}</h1>
+        </header>
 
-      <div className="paper-sections">
-        {paper.sections?.map((section, index) => (
-          <PaperSection
-            key={`${section.heading}-${index}`}
-            section={section}
-            index={index}
-            referenceNumberMap={referenceNumberMap}
-            formatPaperText={formatPaperText}
-          />
-        ))}
-      </div>
+        <section className="abstract-section">
+          <h2>초록</h2>
+          <p>
+            {formatPaperText(
+              paper.abstract,
+              referenceNumberMap
+            )}
+          </p>
+        </section>
 
-      <section className="conclusion-section">
-        <h2>결론</h2>
-        <p>
-          {formatPaperText(
-            paper.conclusion,
-            referenceNumberMap
-          )}
-        </p>
-      </section>
+        <div className="paper-sections">
+          {paper.sections?.map((section, index) => (
+            <PaperSection
+              key={`${section.heading}-${index}`}
+              section={section}
+              index={index}
+              referenceNumberMap={referenceNumberMap}
+              formatPaperText={formatPaperText}
+            />
+          ))}
+        </div>
 
-      <ReferenceList references={references} />
-    </article>
+        <section className="conclusion-section">
+          <h2>결론</h2>
+          <p>
+            {formatPaperText(
+              paper.conclusion,
+              referenceNumberMap
+            )}
+          </p>
+        </section>
+
+        <ReferenceList references={references} />
+      </article>
+    </>
   );
 }
 
