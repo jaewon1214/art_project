@@ -9,6 +9,7 @@ function App() {
   const [topic, setTopic] = useState(
     "생성형 AI와 음악 창작의 저작권 및 창작자성"
   );
+  const [inputType, setInputType] = useState("topic");
   const [paper, setPaper] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -19,7 +20,10 @@ function App() {
     setPaper(null);
 
     try {
-      const result = await generatePaper(topic.trim());
+      const result = await generatePaper(
+        topic.trim(),
+        inputType
+      );
       setPaper(result);
     } catch (err) {
       setError(
@@ -51,13 +55,15 @@ function App() {
         <div className="workspace-grid">
           <aside className="control-panel">
             <div className="panel-heading">
-              <h2>연구 주제</h2>
-              <p>분석할 주제를 구체적으로 입력해 주세요.</p>
+              <h2>연구 입력</h2>
+              <p>논문 제목 또는 연구 주제를 선택해 입력해 주세요.</p>
             </div>
 
             <PaperForm
               topic={topic}
               setTopic={setTopic}
+              inputType={inputType}
+              setInputType={setInputType}
               onSubmit={handleGenerate}
               loading={loading}
             />
@@ -65,9 +71,9 @@ function App() {
             <div className="writing-guide">
               <h3>작성 안내</h3>
               <ol>
-                <li>연구 대상과 핵심 쟁점을 구체적으로 입력합니다.</li>
-                <li>관련 근거를 바탕으로 논문 초안을 구성합니다.</li>
-                <li>본문의 인용과 참고문헌을 함께 확인합니다.</li>
+                <li>제목 입력 시 해당 문구를 논문 제목으로 그대로 사용합니다.</li>
+                <li>주제 입력 시 내용을 분석해 적절한 논문 제목을 자동 구성합니다.</li>
+                <li>관련 근거와 참고문헌을 함께 확인합니다.</li>
               </ol>
             </div>
           </aside>

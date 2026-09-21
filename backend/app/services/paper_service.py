@@ -33,6 +33,7 @@ class PaperService:
         self,
         topic: str,
         length: int,
+        input_type: str = "topic",
     ) -> FinalPaper:
         try:
             rag_task = asyncio.wait_for(
@@ -75,6 +76,11 @@ class PaperService:
                     rag_result=rag_result,
                     draft=transformer_draft,
                     length=length,
+                    forced_title=(
+                        topic
+                        if input_type == "title"
+                        else None
+                    ),
                 ),
                 timeout=self.LLM_TIMEOUT,
             )

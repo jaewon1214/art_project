@@ -560,6 +560,7 @@ RAG의 근거 검색 기능을 결합하여 근거 기반의 논문 초안을
         rag_result: RagResult,
         draft: TransformerDraft,
         length: int,
+        forced_title: str | None = None,
     ) -> FinalPaper:
         hard_limit = min(
             max(length, 1),
@@ -577,7 +578,11 @@ RAG의 근거 검색 기능을 결합하여 근거 기반의 논문 초안을
             for source in rag_result.sources
         ]
 
-        title = draft.title.strip()
+        title = (
+            forced_title.strip()
+            if forced_title is not None
+            else draft.title.strip()
+        )
 
         headings = [
             "1. 서론",
