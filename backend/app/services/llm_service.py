@@ -17,9 +17,9 @@ class LLMService:
     외부 API 호출은 하지 않는다.
     """
 
-    MAX_FINAL_PAPER_CHARS = 4500
-    DEFAULT_TARGET_CHARS = 4200
-    MIN_MOCK_PAPER_CHARS = 3600
+    MIN_FINAL_PAPER_CHARS = 4500
+    DEFAULT_TARGET_CHARS = 5500
+    MIN_MOCK_PAPER_CHARS = 4500
 
     @staticmethod
     def _trim_text(
@@ -110,23 +110,17 @@ class LLMService:
         """
         요청 길이에 따른 Mock 논문의 목표 길이.
 
-        length=4500이면 약 4200자를 목표로 한다.
+        length=4500이면 약 5500자를 목표로 한다.
         """
 
-        hard_limit = min(
-            max(length, 1),
-            cls.MAX_FINAL_PAPER_CHARS,
+        minimum = max(
+            length,
+            cls.MIN_FINAL_PAPER_CHARS,
         )
 
-        if hard_limit >= 3500:
-            return min(
-                cls.DEFAULT_TARGET_CHARS,
-                hard_limit,
-            )
-
         return max(
-            1,
-            int(hard_limit * 0.9),
+            cls.DEFAULT_TARGET_CHARS,
+            minimum,
         )
 
     @staticmethod
@@ -431,24 +425,24 @@ RAG의 근거 검색 기능을 결합하여 근거 기반의 논문 초안을
         abstract: str,
         sections: list[PaperSection],
         conclusion: str,
-        hard_limit: int,
+        minimum_chars: int,
     ) -> list[PaperSection]:
         """
         Mock 결과가 지나치게 짧은 경우
         3번 분석 섹션에 일반적인 분석 내용을 보충한다.
 
         단:
-        - 사용자가 요청한 최대 길이를 넘지 않는다.
-        - 프로젝트 절대 최대 4500자를 넘지 않는다.
+        - 최소 4500자를 확보한다.
+        - 프로젝트 자체의 최대 글자 수 상한은 두지 않는다.
         - 기존 provenance 문장을 삭제하지 않는다.
         """
 
         if not sections:
             return sections
 
-        minimum_target = min(
+        minimum_target = max(
             cls.MIN_MOCK_PAPER_CHARS,
-            hard_limit,
+            minimum_chars,
         )
 
         current_chars = cls._count_paper_chars(
@@ -459,13 +453,6 @@ RAG의 근거 검색 기능을 결합하여 근거 기반의 논문 초안을
         )
 
         if current_chars >= minimum_target:
-            return sections
-
-        available_chars = (
-            hard_limit - current_chars
-        )
-
-        if available_chars <= 0:
             return sections
 
         extra_analysis = cls._build_extra_analysis(
@@ -482,9 +469,9 @@ RAG의 근거 검색 기능을 결합하여 근거 기반의 논문 초안을
             - current_chars
         )
 
-        append_limit = min(
+        append_limit = max(
             missing_chars + 200,
-            available_chars,
+            1,
         )
 
         extra_analysis = cls._trim_text(
@@ -518,40 +505,6 @@ RAG의 근거 검색 기능을 결합하여 근거 기반의 논문 초안을
             target_index
         ] = updated_section
 
-        # 보충 후에도 혹시 최대 길이를 넘는 경우
-        # 마지막으로 안전하게 잘라낸다.
-        final_chars = cls._count_paper_chars(
-            title=title,
-            abstract=abstract,
-            sections=updated_sections,
-            conclusion=conclusion,
-        )
-
-        if final_chars > hard_limit:
-            overflow = (
-                final_chars
-                - hard_limit
-            )
-
-            safe_limit = max(
-                1,
-                len(updated_content)
-                - overflow
-            )
-
-            safe_content = cls._trim_text(
-                updated_content,
-                safe_limit,
-            )
-
-            updated_sections[
-                target_index
-            ] = PaperSection(
-                heading=target_section.heading,
-                content=safe_content,
-                citations=target_section.citations,
-            )
-
         return updated_sections
 
     async def refine(
@@ -562,14 +515,14 @@ RAG의 근거 검색 기능을 결합하여 근거 기반의 논문 초안을
         length: int,
         forced_title: str | None = None,
     ) -> FinalPaper:
-        hard_limit = min(
-            max(length, 1),
-            self.MAX_FINAL_PAPER_CHARS,
+        minimum_chars = max(
+            length,
+            self.MIN_FINAL_PAPER_CHARS,
         )
 
         target_chars = (
             self._get_target_chars(
-                hard_limit
+                minimum_chars
             )
         )
 
@@ -603,7 +556,7 @@ RAG의 근거 검색 기능을 결합하여 근거 기반의 논문 초안을
             1,
         )
 
-        # 약 4200자 기준:
+        # 약 5500자 기준:
         # 초록       10%
         # 서론       23%
         # 본론       40%
@@ -734,7 +687,7 @@ Transformer 초안과 RAG 검색 근거를 결합하여
             abstract=abstract,
             sections=sections,
             conclusion=conclusion,
-            hard_limit=hard_limit,
+            minimum_chars=minimum_chars,
         )
 
         return FinalPaper(

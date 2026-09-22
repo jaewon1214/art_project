@@ -17,7 +17,7 @@ from backend.app.schemas.transformer import TransformerDraft
 
 
 class OpenAILLMService:
-    MAX_FINAL_PAPER_CHARS = 4500
+    MIN_FINAL_PAPER_CHARS = 4500
 
     # 최종 논문에 노출되면 안 되는
     # 명백한 "내부 생성 과정" 표현만 검사한다.
@@ -116,42 +116,55 @@ class OpenAILLMService:
         length: int,
         forced_title: str | None = None,
     ) -> FinalPaper:
-        # 프로젝트 전체 최대 분량은 4500자.
-        # 사용자가 더 작은 값을 요청하면
-        # 해당 값을 최종 제한으로 사용한다.
-        effective_length = min(
-            max(length, 1),
-            self.MAX_FINAL_PAPER_CHARS,
+        # 프로젝트 정책: 최종 논문은 최소 4500자 이상.
+        # 프로젝트 자체의 최대 글자 수 상한은 두지 않는다.
+        effective_min_length = max(
+            length,
+            self.MIN_FINAL_PAPER_CHARS,
         )
 
         prompt_value = (
             await self.prompt_chain.build_prompt(
                 topic=topic,
-                length=effective_length,
+                length=effective_min_length,
                 rag_result=rag_result,
                 draft=draft,
             )
         )
 
-        generated = await self.structured_llm.ainvoke(
-            prompt_value
-        )
+        last_length_error: ValueError | None = None
 
-        if not isinstance(
-            generated,
-            GeneratedPaperContent,
-        ):
-            raise TypeError(
-                "LLM이 예상한 GeneratedPaperContent "
-                "형식을 반환하지 않았습니다."
+        # 최소 분량 미달 시 한 번 더 생성한다.
+        for _ in range(2):
+            generated = await self.structured_llm.ainvoke(
+                prompt_value
             )
 
-        return self._build_final_paper(
-            generated=generated,
-            rag_result=rag_result,
-            max_chars=effective_length,
-            forced_title=forced_title,
-        )
+            if not isinstance(
+                generated,
+                GeneratedPaperContent,
+            ):
+                raise TypeError(
+                    "LLM이 예상한 GeneratedPaperContent "
+                    "형식을 반환하지 않았습니다."
+                )
+
+            try:
+                return self._build_final_paper(
+                    generated=generated,
+                    rag_result=rag_result,
+                    min_chars=effective_min_length,
+                    forced_title=forced_title,
+                )
+            except ValueError as exc:
+                if "최소 기준보다 짧습니다" not in str(exc):
+                    raise
+                last_length_error = exc
+
+        if last_length_error is not None:
+            raise last_length_error
+
+        raise RuntimeError("논문 생성에 실패했습니다.")
 
     @staticmethod
     def _normalize_heading(
@@ -399,16 +412,18 @@ class OpenAILLMService:
     def _validate_final_length(
         cls,
         paper: FinalPaper,
-        max_chars: int,
+        min_chars: int,
     ) -> None:
         """
         Prompt를 LLM이 위반하더라도
-        Backend에서 최대 분량을 최종 차단한다.
+        Backend에서 최소 분량을 최종 검증한다.
+
+        프로젝트 자체의 최대 글자 수 상한은 적용하지 않는다.
         """
 
-        if max_chars <= 0:
+        if min_chars <= 0:
             raise ValueError(
-                "최종 논문 최대 글자 수는 "
+                "최종 논문 최소 글자 수는 "
                 "1 이상이어야 합니다."
             )
 
@@ -418,12 +433,11 @@ class OpenAILLMService:
             )
         )
 
-        if actual_chars > max_chars:
+        if actual_chars < min_chars:
             raise ValueError(
-                "최종 논문 분량이 제한을 "
-                f"초과했습니다: "
+                "최종 논문 분량이 최소 기준보다 짧습니다: "
                 f"{actual_chars}자 / "
-                f"최대 {max_chars}자"
+                f"최소 {min_chars}자"
             )
 
     @classmethod
@@ -584,7 +598,7 @@ class OpenAILLMService:
         cls,
         generated: GeneratedPaperContent,
         rag_result: RagResult,
-        max_chars: int | None = None,
+        min_chars: int | None = None,
         forced_title: str | None = None,
     ) -> FinalPaper:
         """
@@ -923,18 +937,18 @@ class OpenAILLMService:
             final_paper
         )
 
-        effective_max_chars = (
-            cls.MAX_FINAL_PAPER_CHARS
-            if max_chars is None
-            else min(
-                max(max_chars, 1),
-                cls.MAX_FINAL_PAPER_CHARS,
+        # 일반 정제/단위 테스트에서 min_chars를 생략한 경우에는
+        # 길이 검증을 하지 않는다. 실제 generate 경로의 refine()에서는
+        # 항상 최소 4500자 이상을 전달한다.
+        if min_chars is not None:
+            effective_min_chars = max(
+                min_chars,
+                cls.MIN_FINAL_PAPER_CHARS,
             )
-        )
 
-        cls._validate_final_length(
-            paper=final_paper,
-            max_chars=effective_max_chars,
-        )
+            cls._validate_final_length(
+                paper=final_paper,
+                min_chars=effective_min_chars,
+            )
 
         return final_paper
