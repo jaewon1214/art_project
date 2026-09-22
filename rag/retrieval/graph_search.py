@@ -20,17 +20,28 @@ Postgres에서 그 문서들의 chunk를 전부 끌어와 후보로 반환한다
 
 Neo4j가 아직 설정 안 됐거나(연결 실패) 매칭되는 엔티티가 없으면 빈 리스트를 반환 — 그래프 신호
 없이도 vector+keyword만으로 검색이 계속 동작해야 하므로(다른 검색 함수들과 동일한 방어적 설계).
+
+2026-09-22: _extract_tokens()가 query_text를 그냥 공백 기준으로만 쪼개던 걸 keyword_search.py와
+동일하게 tokenize_for_search() 기반으로 바꿈. Neo4j entities.name은 LLM이 뽑은 깨끗한 명사
+(조사 없음, entity_extraction/extractor.py 참고)인데, 원문을 공백으로만 쪼개면 "신탁·등록"
+"저작물의"처럼 조사/구두점이 그대로 붙은 토큰이 남아서 아래 Cypher의 `e.name CONTAINS token`
+substring 매칭이 실패함(예: entity.name="신탁"이어도 token="신탁·등록"은 entity.name보다 길어서
+아예 안 걸림). keyword_search.py에서 고친 "원문 vs 형태소분석 불일치"와 같은 계열의 문제 —
+형태소분석 결과가 비면(쿼리가 영문/기호뿐인 경우 등) 기존처럼 원문 공백분리로 폴백.
 """
 from __future__ import annotations
 
 from database.config import get_neo4j_driver
+from rag.preprocessing.korean_tokenize import tokenize_for_search
 
 _ENTITY_LABELS = ("Artist", "Company", "AIModel", "Topic", "Case", "Law")
 _MIN_TOKEN_LEN = 2  # 한 글자짜리 토큰은 노이즈 매칭이 너무 많아져서 제외
 
 
 def _extract_tokens(query_text: str) -> list[str]:
-    return [t for t in query_text.split() if len(t) >= _MIN_TOKEN_LEN]
+    tokenized = tokenize_for_search(query_text)
+    words = tokenized.split() if tokenized else query_text.split()
+    return [t for t in words if len(t) >= _MIN_TOKEN_LEN]
 
 
 # 관계 타입 가중치 — DISCUSSES(핵심 주제로 다룸)가 CITES(근거로 인용)보다, CITES가
