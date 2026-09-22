@@ -45,10 +45,94 @@ _BRACKETED_COPYRIGHT_FOOTER_RE = re.compile(
     re.IGNORECASE,
 )
 
+# 2026-09-22 추가: 국내 언론/공공기관 사이트 대부분이 접근성을 위해 페이지 맨 앞에 넣는
+# "본문 바로가기"/"사이트 바로가기"/"주메뉴 바로가기"/"메인메뉴 바로가기"/
+# "시작페이지로 즐겨찾기" 같은 스킵 내비게이션(skip-navigation) 링크 문구 — 실제 DOM <a>
+# 태그라 strip_noise_tags()의 nav/header 태그 제거로는 못 잡히고(본문 <article>/<body> 바로
+# 안쪽에 첫 텍스트로 박혀있는 구조), 저작권 꼬리말과 마찬가지로 뒤에 오는 실제 제목/본문과
+# 같은 줄에 그대로 붙어 나와서(예: "본문 바로가기 사이트 바로가기 문화 문화일반 AI 활용
+# 음악...") 줄 단위 필터(strip_boilerplate_lines)로는 못 걸러짐. 실측: 한국일보
+# (hankookilbo.com) 6건 포함 총 15건, 8개 매체(economist.co.kr/korea.kr/todayeconomic.com/
+# inthenews.co.kr/h21.hani.co.kr/news.ebs.co.kr/youthdaily.co.kr)에서 확인
+# (documents_20260921_221839.json 감사). 문구 자체가 매체 무관하게 고정돼 있어 저작권
+# 꼬리말과 동일한 방식으로 텍스트 레벨에서 곧장 제거.
+_SKIP_NAV_RE = re.compile(
+    r"(?:주\s?메뉴|메인\s?메뉴|본문|사이트)\s?바로가기|시작\s?페이지로\s?즐겨찾기"
+)
+
+# 2026-09-22 추가(같은 날 두 번째 발견): 중앙일보(joongang.co.kr)는 기사 본문 앞에 "지면보기"
+# PDF 열람 로그인 유도 모달 + "더중앙플러스" 유료회원 가입 유도 모달 텍스트를 통째로 붙여서
+# 내려줌 — 실제 DOM 팝업이라 strip_noise_tags()로는 못 잡히고 본문과 같은 텍스트 스트림에
+# 이어져 있어 줄 단위 필터로도 못 걸러짐. documents_20260921_221839.json 감사 결과 joongang.co.kr
+# 12건 전부에서 완전히 동일한 바이트로("더중앙플러스 시작하기 Close " 뒤에 바로 실제 기사가
+# 시작) 반복 확인돼, 매체 특정 고정 블록으로 보고 정확히 일치하는 접두 블록을 통째로 제거.
+_JOONGANG_PAYWALL_MODAL_RE = re.compile(
+    r"중앙일보 지면보기 서비스는 로그인 후 이용 가능합니다\.\s*"
+    r"로그인 하러 가기 Close 최근 1개월 내 지면만 열람하실 수 있습니다\.\s*"
+    r"Close 중앙일보 지면보기 서비스는 로그인 후 이용 가능합니다\.\s*"
+    r"로그인 하러 가기 Close 로그인 하시면 최신호의 전체 내용을 보실 수 있습니다\.\s*"
+    r"로그인 하시겠습니까\?\s*"
+    r"로그인 Close 더중앙플러스 회원이 되시면 창간호부터 전체 지면보기와 지면 다운로드가 가능합니다\.\s*"
+    r"더중앙플러스 회원이 되시겠습니까\?\s*"
+    r"더중앙플러스 시작하기 Close\s*"
+)
+
+# 2026-09-22 추가(사용자가 여러 매체 URL을 직접 열어 수동으로 찾은 잡음 일괄 반영):
+# 각각 다른 매체의 기사 상세페이지 UI 위젯이 본문과 같은 텍스트 스트림에 그대로 섞여
+# 들어오는 경우들 — 전부 실제 DOM 팝업/버튼/툴바라 strip_noise_tags()로는 못 잡히고,
+# 앞뒤 실제 본문과 한 줄에 붙어 나와서 줄 단위 필터로도 못 걸러짐. 위 스킵네비/중앙일보
+# 사례와 동일한 방식(텍스트 레벨 고정 문구 제거)으로 처리.
+#  - tvdaily.co.kr: "즐겨찾기 추가 글로벌 티브이데일리 중국 SINA.com QQ.com hi好酷.com" —
+#    최상단 즐겨찾기 버튼 + 해외판 사이트 링크 목록(3건 전부 동일 바이트로 확인).
+#  - yna.co.kr(연합뉴스): 바이라인 뒤에 "구독 구독중 이전 다음"(구독 버튼+이전/다음 기사
+#    내비게이션)이 그대로 붙음 — 바이라인 자체는 실제 정보라 남기고 위젯 부분만 제거.
+#  - mk.co.kr(매일경제): "뉴스 바로가기 햄버거 AI검색 로그인 마이페이지 로그아웃 매일경제
+#    60 Maeil Business News Korea 듣는 중입니다." — 사이트 헤더 메뉴+TTS 위젯. 7건 전부
+#    완전히 동일한 바이트로 확인돼 고정 리터럴로 등록.
+#  - shindonga.donga.com: "최근검색어 최근 검색어 내역이 없습니다." — 검색창 위젯(3건 동일).
+#  - todayeconomic.com/inthenews.co.kr/theguru.co.kr/youthdaily.co.kr류: "메일 프린트
+#    스크랩 글씨크기 크게 글씨크기 작게"(공유/인쇄/스크랩/폰트크기 툴바) — 사이트마다
+#    앞뒤에 "엑스 네이버블로그 메일"이나 영어 요일-날짜-시각(예: "Sunday, April 12, 2026,
+#    08:04:06" — 이것도 실제 게재일이 아니라 툴바 옆에 붙는 페이지 렌더링 시각성 위젯
+#    텍스트로 보고 같이 제거), "카카오스토리 네이버블로그"가 붙어 나와 선택적으로 포함.
+#  - nongmin.com: "TTS 스크랩 프린트 작게 크게" — 위와 같은 툴바의 다른 어순/조합.
+#  - kookbang.dema.mil.kr(국방일보): "이 기사를 스크랩 하시겠습니까?" — 스크랩 확인 팝업.
+#  - goodkyung.com: "다른 공유 찾기 기사스크랩하기" — 공유/스크랩 버튼 묶음.
+_FAVORITE_ADD_RE = re.compile(r"즐겨찾기\s?추가")
+_TVDAILY_SHARE_ICONS_RE = re.compile(
+    r"글로벌\s?티브이데일리\s?중국\s?SINA\.com\s?QQ\.com\s?hi好酷\.com"
+)
+_SUBSCRIBE_NAV_WIDGET_RE = re.compile(r"구독\s?구독중\s?이전\s?다음")
+_MK_HEADER_RE = re.compile(re.escape(
+    "뉴스 바로가기 햄버거 AI검색 로그인 마이페이지 로그아웃 매일경제 60 "
+    "Maeil Business News Korea 듣는 중입니다."
+))
+_RECENT_SEARCH_EMPTY_RE = re.compile(r"최근검색어\s?최근\s?검색어\s?내역이\s?없습니다\.")
+_SHARE_TOOLBAR_CLUSTER_RE = re.compile(
+    r"(?:엑스\s*네이버블로그\s*메일\s*)?"
+    r"(?:메일\s*)?프린트\s*스크랩\s*글[씨자]크기\s*크게\s*글[씨자]크기\s*작게"
+    r"(?:\s*[A-Za-z]+,\s*[A-Za-z]+\s*\d{1,2},\s*\d{4},\s*\d{1,2}:\d{2}:\d{2})?"
+    r"(?:\s*카카오스토리\s*네이버블로그)?"
+)
+_TTS_SCRAP_PRINT_RE = re.compile(r"TTS\s*스크랩\s*프린트\s*작게\s*크게")
+_SCRAP_CONFIRM_RE = re.compile(r"이\s?기사를\s?스크랩\s?하시겠습니까\?")
+_OTHER_SHARE_FIND_SCRAP_RE = re.compile(r"다른\s?공유\s?찾기\s?기사스크랩하기")
+
 
 def normalize_whitespace(text: str) -> str:
     text = _LITERAL_BR_TAG_RE.sub(" ", text)
     text = _BRACKETED_COPYRIGHT_FOOTER_RE.sub(" ", text)
+    text = _SKIP_NAV_RE.sub(" ", text)
+    text = _JOONGANG_PAYWALL_MODAL_RE.sub(" ", text)
+    text = _TVDAILY_SHARE_ICONS_RE.sub(" ", text)
+    text = _FAVORITE_ADD_RE.sub(" ", text)
+    text = _SUBSCRIBE_NAV_WIDGET_RE.sub(" ", text)
+    text = _MK_HEADER_RE.sub(" ", text)
+    text = _RECENT_SEARCH_EMPTY_RE.sub(" ", text)
+    text = _SHARE_TOOLBAR_CLUSTER_RE.sub(" ", text)
+    text = _TTS_SCRAP_PRINT_RE.sub(" ", text)
+    text = _SCRAP_CONFIRM_RE.sub(" ", text)
+    text = _OTHER_SHARE_FIND_SCRAP_RE.sub(" ", text)
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
